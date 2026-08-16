@@ -13,3 +13,8 @@ dependencies = [
     "redis>=8.1.0",
     "uvicorn>=0.52.3",
 ]
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.10.0",
+]
