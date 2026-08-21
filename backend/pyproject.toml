@@ -3,7 +3,7 @@ name = "backend"
 version = "0.1.0"
 description = "Cloud Coding Agent - Agent loop with Gemini Interactions API"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.11"
 dependencies = [
     "docker>=7.2.0",
     "fastapi>=0.141.1",

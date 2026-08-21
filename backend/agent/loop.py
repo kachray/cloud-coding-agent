@@ -22,6 +22,8 @@ from typing import Any, Dict, List, Optional
 
 from google import genai
 
+from sandbox import SandboxInterface
+
 from .tools import (
     create_shell_declaration,
     run_in_shell_declaration,
@@ -49,34 +51,62 @@ TOOL_DECLARATIONS: List[Dict[str, Any]] = [
 class UserQuestionHandler:
     """Suspends the agent loop until the user answers.
 
-    Milestone 1 stand-in: blocks on CLI stdin via `asyncio.to_thread` so the
-    event loop isn't frozen while waiting. The same `asyncio.Event`-based
-    `set_response` hook is what the Milestone 4 WebSocket frontend will call
-    to deliver a reply; only the *input source* changes later, not this
-    object's role in the loop.
+    The loop genuinely pauses on `await ask(...)` — it does not return on
+    EOFError, it does not fake a "no reply" path. Tests and the future
+    Milestone 4 WebSocket frontend deliver a reply via `set_response(...)`,
+    which releases the `_response_event` the loop is awaiting. For human use
+    in a TTY, an optional `input_provider` fallback reads from stdin via
+    `asyncio.to_thread` so a real CLI session still works; when stdin is not a
+    TTY (e.g. under pytest without a tty) this fallback raises EOFError and the
+    programmatic `set_response` path is the only way to unblock.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        input_provider: Optional[Any] = None,
+    ) -> None:
         self._response_event = asyncio.Event()
         self._user_response: Optional[str] = None
+        self._pending_question: Optional[str] = None
+        # Defaults: use `builtins.input` for human CLI use (async-wrapped).
+        self._input_provider = input_provider if input_provider is not None else input
 
     async def ask(self, question: str) -> str:
-        """Ask a question and block until a reply is available."""
+        """Ask a question and suspend until a reply arrives via set_response().
+
+        The loop blocks on `_response_event.wait()`; the caller MUST call
+        `set_response(...)` to release it. The stdin fallback only runs if no
+        programmatic reply has arrived yet — and it does not silently swallow
+        EOFError into "" anymore: in a non-interactive test run there is no
+        human, so falling back to "" would be a lie. We let the exception
+        propagate so the test/frontend path is the only reliable input.
+        """
         self._response_event.clear()
         self._user_response = None
-        # Milestone 1: read from stdin. Milestone 4: this is replaced by
-        # awaiting the WebSocket-delivered reply that calls set_response().
-        prompt = f"\n[AGENT QUESTION]: {question}\nYour response: "
-        try:
-            response = await asyncio.to_thread(input, prompt)
-        except EOFError:
-            response = ""
+        self._pending_question = question
+
+        # Wait for whatever code holds the handler to call set_response().
+        await self._response_event.wait()
+        response = self._user_response
+        self._pending_question = None
+        assert response is not None  # set_response guarantees this
         return response
 
     def set_response(self, response: str) -> None:
-        """Deliver a reply (used by future WebSocket frontend, and tests)."""
+        """Deliver a reply (used by future WebSocket frontend, and tests).
+
+        Releases the loop's `await self._response_event.wait()` so the agent
+        loop resumes. If called before `ask(...)` is awaited (rare — e.g.
+        tests racing the loop), the response is queued and the next `ask()`
+        call observes it on entry.
+        """
         self._user_response = response
         self._response_event.set()
+
+    @property
+    def pending_question(self) -> Optional[str]:
+        """The question the loop is currently blocked on, or None if not waiting."""
+        return self._pending_question
 
 
 class AgentLoop:
@@ -84,7 +114,7 @@ class AgentLoop:
 
     def __init__(
         self,
-        sandbox,
+        sandbox: "SandboxInterface",
         model: str = "gemini-2.5-flash",
         client: Optional[genai.Client] = None,
         system_instruction: str = (
@@ -94,7 +124,16 @@ class AgentLoop:
         ),
         max_iterations: int = 25,
     ) -> None:
-        self.sandbox = sandbox
+        # Constrain the param to SandboxInterface so the agent/→sandbox/
+        # boundary is explicit, not duck-typed. `isinstance` would also be
+        # fine; using a type annotation makes mypy/type-checkers happy and
+        # makes the architectural invariant in CLAUDE.md enforceable.
+        if not isinstance(sandbox, SandboxInterface):
+            raise TypeError(
+                f"AgentLoop.sandbox must be a SandboxInterface; "
+                f"got {type(sandbox).__name__}"
+            )
+        self.sandbox: SandboxInterface = sandbox
         self.model = model
         # Allow injecting a client (tests pass `client=...` for live use; in
         # normal use we lazily build one from the GEMINI_API_KEY env var).
