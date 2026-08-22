@@ -82,8 +82,12 @@ class UserQuestionHandler:
         human, so falling back to "" would be a lie. We let the exception
         propagate so the test/frontend path is the only reliable input.
         """
+        # If set_response was called before this method started, we already have a reply
+        if self._user_response is not None:
+            self._pending_question = None
+            return self._user_response
+
         self._response_event.clear()
-        self._user_response = None
         self._pending_question = question
 
         # Check if stdin is a TTY - if so, use stdin fallback for human users.
@@ -114,15 +118,17 @@ class UserQuestionHandler:
                 self._pending_question = None
                 return self._user_response
 
-            # Fall back to stdin input result
-            try:
-                response = stdin_task.result()
-            except asyncio.CancelledError:
-                # This shouldn't happen, but handle it
-                raise RuntimeError("User question failed with cancellation")
+            # Fall back to stdin input result (only if stdin task finished)
+            if stdin_task.done() and not stdin_task.cancelled():
+                try:
+                    response = stdin_task.result()
+                except Exception as exc:
+                    raise RuntimeError(f"Failed to get input from stdin: {exc}") from exc
+                self._pending_question = None
+                return response
 
-            self._pending_question = None
-            return response
+            # Neither completed - this shouldn't happen, but raise an error
+            raise RuntimeError("User question wait failed unexpectedly")
         else:
             # Non-TTY context (tests, CI) - just wait for set_response()
             # with a timeout to provide a helpful error if test forgets
@@ -147,8 +153,15 @@ class UserQuestionHandler:
         tests racing the loop), the response is queued and the next `ask()`
         call observes it on entry.
         """
-        self._user_response = response
-        self._response_event.set()
+        # Store response even if event isn't set yet (for pre-call race condition)
+        if self._user_response is None:
+            self._user_response = response
+            self._response_event.set()
+        else:
+            # Already have a response - update it and set event (idempotent)
+            self._user_response = response
+            if not self._response_event.is_set():
+                self._response_event.set()
 
     @property
     def pending_question(self) -> Optional[str]:
