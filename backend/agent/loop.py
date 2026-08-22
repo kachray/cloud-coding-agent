@@ -17,6 +17,7 @@ swapped in without touching `agent/`.
 """
 import asyncio
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -85,12 +86,58 @@ class UserQuestionHandler:
         self._user_response = None
         self._pending_question = question
 
-        # Wait for whatever code holds the handler to call set_response().
-        await self._response_event.wait()
-        response = self._user_response
-        self._pending_question = None
-        assert response is not None  # set_response guarantees this
-        return response
+        # Check if stdin is a TTY - if so, use stdin fallback for human users.
+        # In non-interactive contexts (tests, CI), rely on set_response().
+        if sys.stdin.isatty():
+            prompt = f"\n[AGENT QUESTION]: {question}\nYour response: "
+            # Race between set_response() and stdin input.
+            stdin_task = asyncio.create_task(
+                asyncio.to_thread(self._input_provider, prompt)
+            )
+            event_task = asyncio.create_task(self._response_event.wait())
+
+            # Wait for whichever completes first
+            done, pending = await asyncio.wait(
+                [stdin_task, event_task], return_when=asyncio.FIRST_COMPLETED
+            )
+
+            # Cancel the pending task
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+            # Check if we got a response via set_response
+            if self._user_response is not None:
+                self._pending_question = None
+                return self._user_response
+
+            # Fall back to stdin input result
+            try:
+                response = stdin_task.result()
+            except asyncio.CancelledError:
+                # This shouldn't happen, but handle it
+                raise RuntimeError("User question failed with cancellation")
+
+            self._pending_question = None
+            return response
+        else:
+            # Non-TTY context (tests, CI) - just wait for set_response()
+            # with a timeout to provide a helpful error if test forgets
+            try:
+                await asyncio.wait_for(self._response_event.wait(), timeout=300.0)
+            except asyncio.TimeoutError:
+                raise RuntimeError(
+                    "user_question timed out waiting for response. "
+                    "In non-interactive contexts, call set_response() to provide an answer."
+                )
+
+            response = self._user_response
+            self._pending_question = None
+            assert response is not None  # set_response guarantees this
+            return response
 
     def set_response(self, response: str) -> None:
         """Deliver a reply (used by future WebSocket frontend, and tests).
