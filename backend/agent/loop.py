@@ -22,6 +22,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from google import genai
+from google.genai._gaos.types.interactions.functionresultstep import (
+    FunctionResultStep,
+)
 
 from sandbox import SandboxInterface
 
@@ -151,6 +154,14 @@ class UserQuestionHandler:
             try:
                 await asyncio.wait_for(self._response_event.wait(), timeout=300.0)
             except asyncio.TimeoutError:
+                # set_response may have released the event while wait_for was
+                # cancelling the inner task (the race documented in Python's
+                # asyncio.wait_for notes).  Check before raising so a response
+                # that arrived during cancellation is not silently dropped.
+                if self._user_response is not None:
+                    response = self._user_response
+                    self._pending_question = None
+                    return response
                 raise RuntimeError(
                     "user_question timed out waiting for response. "
                     "In non-interactive contexts, call set_response() to provide an answer."
@@ -257,17 +268,19 @@ class AgentLoop:
                 self.previous_interaction_id = interaction.id
                 return interaction.output_text or ""
 
-            # Execute every function call, then send the results back.
-            result_steps: List[Dict[str, Any]] = []
+            # Execute every function call, then send the results back as
+            # FunctionResultStep SDK objects — plain dicts are rejected by the
+            # API with "Invalid input received." on turn 2+ because pydantic
+            # validation/serialization must run on the result field.
+            result_steps: List[FunctionResultStep] = []
             for fc in function_calls:
                 result_text = await self._execute_tool(fc.name, dict(fc.arguments))
                 result_steps.append(
-                    {
-                        "type": "function_result",
-                        "call_id": fc.id,
-                        "name": fc.name,
-                        "result": result_text,
-                    }
+                    FunctionResultStep(
+                        call_id=fc.id,
+                        name=fc.name,
+                        result=result_text,
+                    )
                 )
 
             self.previous_interaction_id = interaction.id
