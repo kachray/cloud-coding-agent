@@ -66,6 +66,13 @@ class UserQuestionHandler:
         self,
         input_provider: Optional[Any] = None,
     ) -> None:
+        """Create the handler.
+
+        * `input_provider` — a sync callable `(prompt: str) -> str` used in
+          real TTY sessions as a fallback when `set_response()` hasn't arrived
+          yet. Defaults to `builtins.input`. Ignored in non-TTY mode (tests,
+          CI, the future WebSocket frontend).
+        """
         self._response_event = asyncio.Event()
         self._user_response: Optional[str] = None
         self._pending_question: Optional[str] = None
@@ -90,9 +97,18 @@ class UserQuestionHandler:
         self._response_event.clear()
         self._pending_question = question
 
-        # Check if stdin is a TTY - if so, use stdin fallback for human users.
-        # In non-interactive contexts (tests, CI), rely on set_response().
-        if sys.stdin.isatty():
+        # Check if we should use stdin fallback or event-only mode.
+        # Use stdin only in real TTY environments where stdin has an actual terminal.
+        # Check for test environment markers and also verify stdin has a valid fileno.
+        in_test_env = (
+            "PYTEST_CURRENT_TEST" in os.environ or
+            "PYTESTLAUNCH" in os.environ or
+            not hasattr(sys.stdin, 'fileno') or
+            sys.stdin.fileno() < 0
+        )
+        is_tty = sys.stdin.isatty() and not in_test_env
+
+        if is_tty:
             prompt = f"\n[AGENT QUESTION]: {question}\nYour response: "
             # Race between set_response() and stdin input.
             stdin_task = asyncio.create_task(
@@ -188,6 +204,10 @@ class AgentLoop:
         # boundary is explicit, not duck-typed. `isinstance` would also be
         # fine; using a type annotation makes mypy/type-checkers happy and
         # makes the architectural invariant in CLAUDE.md enforceable.
+        # Enforce the Milestone 1 architectural invariant: `agent/` must never
+        # import a concrete sandbox implementation. A TypeError here catches
+        # accidental coupling at construction time rather than letting it
+        # surface as an AttributeError deep inside a tool call.
         if not isinstance(sandbox, SandboxInterface):
             raise TypeError(
                 f"AgentLoop.sandbox must be a SandboxInterface; "

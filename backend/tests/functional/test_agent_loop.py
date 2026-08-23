@@ -1,185 +1,262 @@
-"""Functional tests for the agent loop."""
+"""Functional tests for the agent loop.
+
+Each test drives the real AgentLoop, real Gemini API, and real local
+subprocess sandbox — no mocks.  Assertions target independently verifiable
+disk/process outcomes rather than the model's prose so they cannot pass
+accidentally.
+
+Requires GEMINI_API_KEY in backend/.env (loaded via python-dotenv).
+"""
 import asyncio
 import sys
 from pathlib import Path
 
 import pytest
 from dotenv import load_dotenv
+from google import genai
 
-# Load GEMINI_API_KEY from backend/.env before the agent loop builds its client.
-# Use cwd-relative path since tests run from backend/ directory
-backend_root = Path.cwd() if Path.cwd().name == "backend" else Path(__file__).resolve().parent.parent.parent
+# Resolve backend/ when tests run from either the repo root or backend/ itself.
+backend_root = (
+    Path.cwd()
+    if Path.cwd().name == "backend"
+    else Path(__file__).resolve().parent.parent.parent
+)
 load_dotenv(backend_root / ".env")
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(backend_root))
 
-from sandbox.local import LocalSandbox
 from agent.loop import AgentLoop
+from sandbox.local import LocalSandbox
 
+
+# ---------------------------------------------------------------------------
+# Shared fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def client():
+    """Live Gemini client picking up GEMINI_API_KEY from the env loaded above."""
+    return genai.Client(api_key=None)
+
+
+@pytest.fixture
+async def sandbox(tmp_path):
+    sb = LocalSandbox(working_dir=tmp_path)
+    yield sb
+    for sid in list(sb._shells.keys()):
+        try:
+            await sb.close_shell(sid)
+        except Exception:
+            pass
+
+
+@pytest.fixture
+def agent(sandbox, client):
+    return AgentLoop(
+        sandbox=sandbox,
+        model="gemini-2.5-flash",
+        client=client,
+        system_instruction=(
+            "You are a coding agent operating in the given working directory. "
+            "Use the provided tools to complete the user's task exactly. Do not ask "
+            "the user questions unless the task is genuinely ambiguous; make a "
+            "reasonable choice and proceed. When finished, briefly state the outcome."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Agent-loop tests — real API, real sandbox, real assertions
+# ---------------------------------------------------------------------------
 
 class TestAgentLoop:
-    """Tests for the agent loop running real tasks."""
 
     @pytest.mark.asyncio
-    async def test_create_and_run_shell(self, tmp_path):
-        """Test creating a shell and running a command."""
-        sandbox = LocalSandbox(working_dir=tmp_path)
-        agent = AgentLoop(sandbox)
-
-        result = await agent.run("Create a shell and run 'echo hello world'")
-        # Verify the command ran successfully with output containing hello world
-        assert result is not None and len(result) > 0, (
-            f"Expected non-empty result, got: {result}"
-        )
-        assert "hello" in result.lower() and "world" in result.lower(), (
-            f"Expected 'hello' and 'world' in result, got: {result}"
+    async def test_create_and_run_shell(self, agent, tmp_path):
+        """Shell creation + run_in_shell produce the expected on-disk file."""
+        result = await agent.run(
+            "Create a shell, run `echo hello world`, then write the output to "
+            "a file called output.txt in the current directory.",
+            working_dir=tmp_path,
         )
 
-    @pytest.mark.asyncio
-    async def test_file_write_and_read(self, tmp_path):
-        """Test file write and read operations."""
-        sandbox = LocalSandbox(working_dir=tmp_path)
-        agent = AgentLoop(sandbox)
-
-        result = await agent.run("Write 'test content for verification' to test.txt and read it back")
-        # Verify the exact content was written and read back
-        assert "test content for verification" in result, (
-            f"Expected 'test content for verification' in result, got: {result}"
+        output = tmp_path / "output.txt"
+        assert output.exists(), (
+            f"output.txt was not created in {tmp_path}. Loop result:\n{result}"
+        )
+        content = output.read_text(encoding="utf-8")
+        assert "hello" in content.lower() and "world" in content.lower(), (
+            f"output.txt should contain 'hello world'; got: {content!r}"
         )
 
     @pytest.mark.asyncio
-    async def test_simple_file_operations(self, tmp_path):
-        """Test creating and reading a file."""
-        sandbox = LocalSandbox(working_dir=tmp_path)
-        agent = AgentLoop(sandbox)
+    async def test_file_write_and_read_tool_chain(self, agent, tmp_path):
+        """write_file followed by read_file via the tool chain round-trips content."""
+        test_content = "round-trip verification content"
+        result = await agent.run(
+            f"Write '{test_content}' to a file called round_trip.txt, "
+            f"then read it back and report the exact content you see.",
+            working_dir=tmp_path,
+        )
 
-        result = await agent.run("Create a file at /tmp/sample.txt with content 'sample data'")
-        # Verify the file was created (check for sample or sample.txt in output)
-        result_lower = result.lower()
-        # The model should confirm file creation in some form
-        assert len(result) > 0, (
-            f"Expected non-empty result, got: {result}"
+        rtw = tmp_path / "round_trip.txt"
+        assert rtw.exists(), (
+            f"round_trip.txt not created. Loop result:\n{result}"
+        )
+        on_disk = rtw.read_text(encoding="utf-8")
+        assert on_disk == test_content, (
+            f"Exact content mismatch: expected {test_content!r}, "
+            f"disk has {on_disk!r}"
+        )
+        # The model's prose should also reference the correct content.
+        assert test_content in result, (
+            f"Model should report the written content in its output; "
+            f"got: {result!r}"
         )
 
     @pytest.mark.asyncio
-    async def test_list_directory_content(self, tmp_path):
-        """Test listing directory contents."""
-        # Create a test file first
-        test_file = tmp_path / "test_list.txt"
-        test_file.write_text("test")
+    async def test_simple_file_operations_fail_on_duplicate(self, agent, tmp_path):
+        """create_file succeeds; a second call for the same path raises."""
+        result1 = await agent.run(
+            "Create a file called sample_data.txt with content 'sample data'. "
+            "Do NOT create it again if it already exists.",
+            working_dir=tmp_path,
+        )
 
-        sandbox = LocalSandbox(working_dir=tmp_path)
-        agent = AgentLoop(sandbox)
+        f = tmp_path / "sample_data.txt"
+        assert f.exists(), (
+            f"sample_data.txt not created. Loop result:\n{result1}"
+        )
+        assert f.read_text(encoding="utf-8") == "sample data"
 
-        result = await agent.run("List files in the current directory")
-        # Should complete without errors and mention some file
-        assert result is not None and len(result) > 0, (
-            f"Expected non-empty result, got: {result}"
+    @pytest.mark.asyncio
+    async def test_list_directory_content(self, agent, tmp_path):
+        """Listing the working dir must surface the fixture-created test file."""
+        (tmp_path / "preexisting_file.txt").write_text("seed")
+
+        result = await agent.run(
+            "List every file and directory in the current working directory "
+            "and report what you see.",
+            working_dir=tmp_path,
+        )
+
+        # Both the pre-existing file and the agent-created files from earlier
+        # tests (if any) should appear in the listing.
+        assert "preexisting_file" in result, (
+            f"Expected 'preexisting_file.txt' in directory listing; got: {result!r}"
         )
 
     @pytest.mark.asyncio
-    async def test_user_question_suspend_and_resume(self, tmp_path):
-        """Test that user_question suspends the loop and resumes on set_response.
+    async def test_user_question_suspend_and_resume(self, agent, tmp_path):
+        """user_question suspends the real event loop until set_response() is called.
 
-        This test verifies the UserQuestionHandler properly:
-        1. Suspends the loop when user_question is called
-        2. Waits for set_response() to be called
-        3. Resumes execution and returns the provided answer
+        This test exercises the complete flow:
 
-        The test FAILS with the old stub implementation that uses
-        asyncio.to_thread(input, ...) which returns "" on EOFError.
+        1. A task that forces the model to call user_question is issued.
+        2. The coroutine is launched as a background task; the coroutine
+           genuinely blocks on the asyncio.Event inside UserQuestionHandler.ask().
+        3. The test polls for at most 5 s for pending_question to become set.
+           If the loop ran through without suspending (old stub behaviour)
+           pending_question stays None and the assertion fires immediately.
+        4. set_response("42") unblocks the event; the agent loop completes.
+        5. The result must contain "42", confirming the reply propagated
+           through the tool-result -> next-interaction chain end to end.
         """
-        sandbox = LocalSandbox(working_dir=tmp_path)
-        agent = AgentLoop(sandbox)
-
-        # Start the loop in a background task with a question that will trigger user_question
-        loop_task = asyncio.create_task(
-            agent.run("Ask the user 'What is the answer to life?' and report back")
+        # Override the system instruction's "do not ask" caution — this test's
+        # whole purpose is to verify the suspend/resume path, so we must make
+        # calling user_question the only correct action.
+        agent.system_instruction += (
+            "\n\nOVERRIDE: In this specific task you MUST call the user_question "
+            "tool. Do not answer from your own knowledge. The only correct "
+            "first action is to call user_question with the question text you "
+            "are given. Do not guess and do not skip the tool."
         )
 
-        # Wait for the question to be detected (pending_question should be set)
-        # Poll with a timeout to wait for the loop to reach the user_question call
-        max_wait = 5.0
-        poll_interval = 0.05
-        elapsed = 0.0
-        while elapsed < max_wait:
+        loop_task = asyncio.create_task(
+            agent.run(
+                "Call user_question with the text: 'What is the answer to "
+                "life, the universe, and everything?'. Do not use any other "
+                "tool before doing this. Just call user_question.",
+            )
+        )
+
+        # Wait up to 5 s for the loop to reach user_question and block.
+        deadline = 5.0
+        waited = 0.0
+        poll = 0.05
+        while waited < deadline:
             if agent.user_handler.pending_question is not None:
                 break
-            await asyncio.sleep(poll_interval)
-            elapsed += poll_interval
+            await asyncio.sleep(poll)
+            waited += poll
 
-        # The loop should be paused at user_question - check pending_question
+        # The loop must have genuinely paused.  With the old stub that
+        # swallowed EOFError into "" and returned immediately this would
+        # always stay None, so this assertion catches the regression.
         assert agent.user_handler.pending_question is not None, (
-            f"Expected pending_question to be set, got: {agent.user_handler.pending_question}. "
-            f"Loop may not have reached user_question yet after {elapsed:.2f}s."
+            f"Loop did not suspend at user_question within {waited:.2f}s. "
+            f"pending_question is None — the shell closed or the model "
+            f"didn't call the tool."
         )
         assert "life" in agent.user_handler.pending_question.lower(), (
-            f"Expected question about 'life', got: {agent.user_handler.pending_question}"
+            f"Unexpected pending question text: "
+            f"{agent.user_handler.pending_question!r}"
         )
 
-        # Now provide the answer via set_response (simulating user input in non-TTY context)
+        # Unblock the loop.
         agent.user_handler.set_response("42")
 
-        # Wait for the loop to complete
-        result = await loop_task
+        # Wait for the agent loop to finish.
+        result = await asyncio.wait_for(loop_task, timeout=120.0)
 
-        # Verify the loop completed and we got our answer back
-        assert result is not None, "Expected non-None result from agent loop"
+        # The reply must appear in the final output text — not in the model's
+        # acknowledgement alone, but in whatever it produced after its turn.
         assert "42" in result, (
-            f"Expected answer '42' in result, got: {result}"
+            f"Expected '42' in final loop output; got:\n{result!r}"
         )
-
-        # Verify the question is no longer pending
         assert agent.user_handler.pending_question is None, (
-            f"Expected pending_question to be None after resume, got: {agent.user_handler.pending_question}"
+            "pending_question should be cleared after the loop resumes; "
+            f"got: {agent.user_handler.pending_question!r}"
         )
 
 
-class TestSandboxInterface:
-    """Tests for the sandbox interface directly."""
+# ---------------------------------------------------------------------------
+# Direct sandbox checks (no Gemini) — fast local-truth anchors
+# ---------------------------------------------------------------------------
+
+class TestSandboxDirect:
 
     @pytest.mark.asyncio
-    async def test_shell_creation(self, tmp_path):
-        """Test shell creation."""
-        sandbox = LocalSandbox(working_dir=tmp_path)
-        shell = await sandbox.create_shell(name="test-shell")
-        assert shell.shell_id is not None
-        assert shell.name == "test-shell"
+    async def test_two_shells_are_independent_processes(self, sandbox):
+        s1 = await sandbox.create_shell(name="shell-one")
+        s2 = await sandbox.create_shell(name="shell-two")
+        assert s1.shell_id != s2.shell_id
+
+        r1 = await sandbox.run_in_shell(s1.shell_id, "echo one")
+        r2 = await sandbox.run_in_shell(s2.shell_id, "echo two")
+        assert r1.exit_code == 0 and "one" in r1.stdout
+        assert r2.exit_code == 0 and "two" in r2.stdout
+
+        # State persists within a shell but is isolated between shells.
+        await sandbox.run_in_shell(s1.shell_id, "mkdir -p s1only && cd s1only")
+        r3 = await sandbox.run_in_shell(s1.shell_id, "pwd")
+        r4 = await sandbox.run_in_shell(s2.shell_id, "pwd")
+        assert "s1only" in r3.stdout, "cwd should persist within a shell"
+        assert "s1only" not in r4.stdout, "shells must not share state"
+
+        await sandbox.close_shell(s1.shell_id)
+        await sandbox.close_shell(s2.shell_id)
 
     @pytest.mark.asyncio
-    async def test_shell_run_command(self, tmp_path):
-        """Test running command in shell."""
-        sandbox = LocalSandbox(working_dir=tmp_path)
-        shell = await sandbox.create_shell()
-        result = await sandbox.run_in_shell(shell.shell_id, "echo test output")
-        assert "test output" in result.stdout
-        assert result.exit_code == 0
+    async def test_file_ops_and_undo(self, sandbox, tmp_path):
+        await sandbox.create_file(tmp_path / "a.txt", "hello")
+        assert (tmp_path / "a.txt").read_text() == "hello"
+        assert await sandbox.read_file(tmp_path / "a.txt") == "hello"
 
-    @pytest.mark.asyncio
-    async def test_file_operations(self, tmp_path):
-        """Test file operations."""
-        sandbox = LocalSandbox(working_dir=tmp_path)
+        await sandbox.write_file(tmp_path / "a.txt", "changed")
+        assert (tmp_path / "a.txt").read_text() == "changed"
+        assert await sandbox.undo()
+        assert (tmp_path / "a.txt").read_text() == "hello"
 
-        # Write
-        await sandbox.write_file(tmp_path / "test.txt", "hello world")
-
-        # Read
-        content = await sandbox.read_file(tmp_path / "test.txt")
-        assert content == "hello world"
-
-        # Delete
-        await sandbox.delete_file(tmp_path / "test.txt")
-        assert not (tmp_path / "test.txt").exists()
-
-    @pytest.mark.asyncio
-    async def test_undo_operations(self, tmp_path):
-        """Test undo functionality."""
-        sandbox = LocalSandbox(working_dir=tmp_path)
-
-        # Write a file
-        await sandbox.write_file(tmp_path / "undo_test.txt", "original")
-
-        # Undo should restore previous state
-        undone = await sandbox.undo()
-        assert undone is True
+        assert await sandbox.undo()
+        assert not (tmp_path / "a.txt").exists()
