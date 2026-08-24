@@ -16,10 +16,13 @@ The loop never imports the sandbox implementation directly — it holds a
 swapped in without touching `agent/`.
 """
 import asyncio
+import logging
 import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from google import genai
 from google.genai._gaos.types.interactions.functionresultstep import (
@@ -38,6 +41,55 @@ from .tools import (
     undo_declaration,
     user_question_declaration,
 )
+
+# --------------- retry helper for Gemini calls -----------------------------
+
+_MAX_RETRIES = 5
+_BASE_BACKOFF = 1.0   # seconds; doubled after each 429, capped at _BACKOFF_CAP
+_BACKOFF_CAP = 30.0
+
+
+async def _call_with_retry(create_fn, **kwargs):
+    """Call the coroutine *create_fn* with exponential-backoff on 429s.
+
+    Parses the ``"Please retry in Xs"`` hint that the free-tier quota
+    error returns and honours it (preferring the server-side hint over the
+    local formula when the hint is the longer of the two).  Propagates the
+    last exception once *max_retries* is exhausted so real errors surface
+    immediately rather than being swallowed.
+
+    ``kwargs`` override ``_MAX_RETRIES`` / ``_BASE_BACKOFF`` / ``_BACKOFF_CAP``
+    defaults for one-off callers.
+    """
+    import re  # local import keeps the top-level namespace clean
+    max_retries = kwargs.pop("max_retries", _MAX_RETRIES)
+    base_backoff = kwargs.pop("base_backoff", _BASE_BACKOFF)
+    backoff_cap   = kwargs.pop("backoff_cap",   _BACKOFF_CAP)
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_retries):
+        try:
+            return await create_fn()
+        except Exception as exc:
+            last_exc = exc
+            msg = str(exc)
+            is_rate_limit = (
+                "429" in msg
+                or "exceeded your current quota" in msg
+                or "Please retry in" in msg
+                or "too_many_requests" in msg
+            )
+            if not is_rate_limit or attempt == max_retries - 1:
+                raise
+            m = re.search(r"Please retry in (\d+\.?\d*)s", msg)
+            suggested = float(m.group(1)) if m else 0.0
+            wait = min(base_backoff * (2 ** attempt), backoff_cap)
+            wait = max(wait, suggested)
+            logger.warning(
+                "Gemini rate-limited (attempt %d/%d); sleeping %.1fs then retrying.",
+                attempt + 1, max_retries, wait,
+            )
+            await asyncio.sleep(wait)
+    raise last_exc  # type: ignore[misc]
 
 # All tool declarations sent to Gemini on every interaction.
 TOOL_DECLARATIONS: List[Dict[str, Any]] = [
@@ -94,8 +146,11 @@ class UserQuestionHandler:
         """
         # If set_response was called before this method started, we already have a reply
         if self._user_response is not None:
+            response = self._user_response
+            self._user_response = None
+            self._response_event.clear()
             self._pending_question = None
-            return self._user_response
+            return response
 
         self._response_event.clear()
         self._pending_question = question
@@ -134,8 +189,11 @@ class UserQuestionHandler:
 
             # Check if we got a response via set_response
             if self._user_response is not None:
+                response = self._user_response
+                self._user_response = None
+                self._response_event.clear()
                 self._pending_question = None
-                return self._user_response
+                return response
 
             # Fall back to stdin input result (only if stdin task finished)
             if stdin_task.done() and not stdin_task.cancelled():
@@ -160,6 +218,7 @@ class UserQuestionHandler:
                 # that arrived during cancellation is not silently dropped.
                 if self._user_response is not None:
                     response = self._user_response
+                    self._user_response = None
                     self._pending_question = None
                     return response
                 raise RuntimeError(
@@ -168,6 +227,8 @@ class UserQuestionHandler:
                 )
 
             response = self._user_response
+            self._user_response = None
+            self._response_event.clear()
             self._pending_question = None
             assert response is not None  # set_response guarantees this
             return response
@@ -251,12 +312,14 @@ class AgentLoop:
 
         current_input: Any = instruction
         for _ in range(self.max_iterations):
-            interaction = await self.client.aio.interactions.create(
-                model=self.model,
-                input=current_input,
-                tools=TOOL_DECLARATIONS,
-                system_instruction=self.system_instruction,
-                previous_interaction_id=self.previous_interaction_id,
+            interaction = await _call_with_retry(
+                lambda: self.client.aio.interactions.create(
+                    model=self.model,
+                    input=current_input,
+                    tools=TOOL_DECLARATIONS,
+                    system_instruction=self.system_instruction,
+                    previous_interaction_id=self.previous_interaction_id,
+                )
             )
 
             function_calls = [
