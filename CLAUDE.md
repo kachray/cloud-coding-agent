@@ -2,27 +2,33 @@
 
 ## Stack
 Backend: Python 3.11+, managed with `uv` (not pip/venv directly — use `uv add`,
-`uv run`). FastAPI. Gemini via the `google-genai` SDK's Interactions API
-(`client.interactions.create` — NOT the older `generate_content(tools=...)`
-pattern; that's superseded). Model: gemini-2.5-flash (confirm availability;
-gemini-3.6-flash is the current default in Google's own docs if 2.5 is
-deprecated by the time this is built — check before assuming). Docker SDK for
-Python (docker-py). Frontend: Vite + React + Tailwind, WebSocket client.
+`uv run`). FastAPI. LLM: Groq via the `openai` SDK pointed at Groq's
+OpenAI-compatible endpoint (`base_url="https://api.groq.com/openai/v1"`,
+`api_key=GROQ_API_KEY`) — NOT the `groq` SDK; the OpenAI-compatible path is
+what CLAUDE.md standardizes on since it's the better-documented, more
+battle-tested shape. Model: openai/gpt-oss-120b (real tool-calling
+reliability; openai/gpt-oss-120b). Docker SDK for Python (docker-py). Frontend: Vite +
+React + Tailwind, WebSocket client.
 
-## Gemini Interactions API — the pattern this project uses
-- Send `tools` as a list of function declarations (dict with type/name/
-  description/parameters — the SDK does NOT auto-generate these from Python
-  docstrings the way some older examples show; write them explicitly).
-- Use the default managed-state mode (server tracks history via
-  `previous_interaction_id`), not `store=False` stateless mode, unless a
-  specific test needs full history inspection — managed mode means
-  agent/loop.py doesn't need to replay the full conversation every turn.
-- After each `create()` call, iterate `interaction.steps` for
-  `step.type == "function_call"` entries (there can be more than one —
-  parallel calls are native, not something we build ourselves). Execute each,
-  then send results back as `function_result` steps referencing `step.id` as
-  `call_id`, with `previous_interaction_id=interaction.id`.
-- Final text is `interaction.output_text`.
+## Groq / OpenAI-compatible tool-calling — the pattern this project uses
+- Standard `chat.completions.create(model=..., messages=[...], tools=[...])`.
+  `tools` is a list of `{"type": "function", "function": {"name", "description",
+  "parameters"}}` dicts — write these explicitly, same discipline as before.
+- Conversation state is client-managed, not server-managed (no
+  `previous_interaction_id` equivalent) — agent/loop.py owns the full
+  `messages` list and appends to it every turn: the assistant's message
+  (including any `tool_calls`), then one `{"role": "tool", "tool_call_id":
+  <id from the tool_call>, "content": <result>}` message per tool call executed.
+- Read tool calls from `response.choices[0].message.tool_calls` (a list —
+  parallel calls are native here too). Final text is
+  `response.choices[0].message.content` once `tool_calls` is empty/None.
+- **Rate limiting lives inside the API-call wrapper itself** (e.g. a
+  `_call_with_retry` function in agent/loop.py), not bolted onto individual
+  test call sites. Every call through AgentLoop — tests, and later the real
+  multi-sandbox production path — is automatically serialized/throttled this
+  way. Do not add per-test rate-limit boilerplate; if a test needs one, the
+  wrapper is broken, fix it there.
+
 
 
 ## Architecture invariant
@@ -53,7 +59,7 @@ separate session or read-only subagent — not the one that implemented the
 milestone — has independently confirmed the tests actually assert real
 behavior and the implementation matches the plan. These tests run a real task
 through the real agent loop and assert on real outcomes (files created,
-commands run, commits made) — not mocks of the Gemini API or the sandbox,
+commands run, commits made) — not mocks of the Groq API or the sandbox,
 which would defeat the purpose. An agent checking its own work in the same
 context that produced it is not a verification pass; treat it as one anyway
 and you will eventually ship a milestone whose "passing" tests don't

@@ -1,6 +1,6 @@
 """Functional-test fixtures shared across tests/functional/."""
+import asyncio
 import sys
-import threading
 from pathlib import Path
 
 import pytest
@@ -19,49 +19,53 @@ from sandbox.local import LocalSandbox  # noqa: E402
 from agent.loop import AgentLoop        # noqa: E402
 
 
-# ---- Test-body serialisation ---------------------------------------------
-# An asyncio context manager that holds a threading.Lock for the *entire*
-# duration of the test body, preventing pytest-asyncio from running two
-# async test bodies concurrently (which would still share the event loop
-# and therefore blast the API simultaneously).
-_serial = threading.Lock()
+# ---- Test-body serialization ---------------------------------------------
+# Uses a per-session `asyncio.Semaphore(1)` as an async barrier.
+# Only one async test body holds the semaphore at a time; every other
+# test body blocks at `await _serial_cm()` until the holder releases.
+# Because the holder keeps it for the entire body (async with … yield),
+# the ordering is strict and the API is never hit concurrently.
+#
+# Tests opt in by adding ``_serial_cm`` to their signature::
+#
+#   async def test_something(self, agent, _serial_cm, tmp_path):
+#       async with _serial_cm():
+#           result = await agent.run(...)
 
 class _SerialCM:
-    """Callable async context manager for serialising test bodies.
+    """Async context manager: holds an asyncio.Semaphore(1) for its body."""
 
-    Usage::
+    def __init__(self):
+        self._sem = asyncio.Semaphore(1)
 
-        async with _serial_cm():
-            # ... test body ...
-    """
-
-    async def __aenter__(self):
-        while True:
-            acquired = _serial.acquire(blocking=False)
-            if acquired:
-                return self
-            import time
-            time.sleep(0.05)
-
-    async def __aexit__(self, *exc):
-        _serial.release()
-
-    # Make the instance itself callable so ``async with _serial_cm():``
-    # works (the () triggers __call__ which returns self, an async CtxMgr).
     def __call__(self):
         return self
+
+    async def __aenter__(self):
+        await self._sem.acquire()
+        return self
+
+    async def __aexit__(self, *exc):
+        self._sem.release()
+        return False
 
 
 @pytest.fixture(scope="session")
 def _serial_cm():
-    """Session-scoped serialisation gate — call with ``async with _serial_cm():``."""
+    """One shared barrier for the whole test session."""
     return _SerialCM()
 
 
+# ---- Shared fixtures -----------------------------------------------------
+
 @pytest.fixture
-def client(_acquire_gemini_slot):
-    """Live Gemini client with session-level rate gating."""
-    _acquire_gemini_slot()
+def client():
+    """Live Gemini client — no rate-limit call here.
+
+    Slot acquisition happens inside ``_serial_cm`` in each test body,
+    immediately before ``agent.run()``, so there is no concurrent
+    client-setup window that could burst the rate limit.
+    """
     return genai.Client(api_key=None)
 
 

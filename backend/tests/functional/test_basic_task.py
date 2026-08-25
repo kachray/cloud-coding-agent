@@ -5,18 +5,16 @@ Requires GEMINI_API_KEY in backend/.env.
 import sys
 from pathlib import Path
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 
 class TestBasicTasks:
 
-    @pytest.mark.asyncio
     async def test_create_hello_txt_containing_world(
-        self, agent, _serial_cm, tmp_path
+        self, agent, _serial_cm, _acquire_gemini_slot, tmp_path
     ):
         async with _serial_cm():
+            _acquire_gemini_slot()
             result = await agent.run(
                 "Create a file called hello.txt containing the word world.",
                 working_dir=tmp_path,
@@ -30,9 +28,11 @@ class TestBasicTasks:
             f"hello.txt content should contain 'world'; got: {content!r}"
         )
 
-    @pytest.mark.asyncio
-    async def test_two_distinct_shells(self, agent, _serial_cm, tmp_path):
+    async def test_two_distinct_shells(
+        self, agent, _serial_cm, _acquire_gemini_slot, tmp_path
+    ):
         async with _serial_cm():
+            _acquire_gemini_slot()
             result = await agent.run(
                 "In one shell run `echo one`, in a separate (different) shell run "
                 "`echo two`, then tell me both outputs.",

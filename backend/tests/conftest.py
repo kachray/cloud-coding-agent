@@ -1,8 +1,7 @@
 """Shared pytest fixtures for the entire test suite.
 
-Serialises functional test execution so only one test uses Gemini at a
-time, and spaces API calls within each test so the suite stays inside the
-20 req/min free-tier ceiling.
+Provides _acquire_gemini_slot: a session-scoped rate limiter that spaces
+Gemini API calls so the suite stays within the free-tier 20 req/min ceiling.
 """
 import sys
 import time
@@ -17,51 +16,36 @@ backend_root = (
 )
 sys.path.insert(0, str(backend_root))
 
-# --- Shared mutable state in a dict so nested closures can mutate it
-#     without running into Python's nonlocal / cell-variable scoping quirks.
-_state = {
-    "lock":        None,   # set to threading.Lock() at first use
-    "running":     False,  # True while a test body is executing
-    "last_api":    0.0,    # monotonic timestamp of the most recent API call
-}
-
-# Mutable container avoids nonlocal scoping issues in deeply nested closures.
-_calls = {"n": 0}
-
-
-def _get_lock():
-    if _state["lock"] is None:
-        import threading
-        _state["lock"] = threading.Lock()
-    return _state["lock"]
+_lock = __import__("threading").Lock()
+_last_call = [0.0]
 
 
 @pytest.fixture(scope="session")
 def _acquire_gemini_slot():
-    """Global gate for Gemini API calls.
+    """Rate-limits Gemini API calls across the whole session.
 
-    Returns a synchronous callable — call it right before each API call.
-    The first call in a new test enforces a 14 s spacing (to account for
-    the burst of calls that test will make); subsequent calls inside the
-    same test use a tighter 5 s spacing.  Thread-safe across the many
-    event loops pytest-asyncio creates.
+    Uses a threading.Lock (survives event-loop churn) plus time.sleep to
+    enforce a minimum gap between calls.  Back-to-back calls within a test
+    use a 5 s gap; the first call after a >30 s gap (i.e., a new test)
+    is treated as a fresh start.
+
+    Returns a **synchronous** callable to invoke right before each API call::
+
+        _acquire_gemini_slot()
+        # ... make Gemini API call ...
     """
-    _test_started = [0.0]   # monotonic; 0 == not yet initialised
+    _test_start = [0.0]
 
-    def _acquire() -> None:
-        with _get_lock():
+    def _acquire():
+        with _lock:
             now = time.monotonic()
-            elapsed = now - _test_started[0]
-            is_first_call = (
-                _test_started[0] == 0.0
-                or elapsed > 14.0   # >14 s since first call => new test
-            )
-            gap = 14.0 if is_first_call else 5.0
-            wait = _state["last_api"] + gap - now
+            is_first = not _test_start[0] or (now - _test_start[0]) > 30.0
+            gap = 30.0 if is_first else 5.0
+            wait = _last_call[0] + gap - now
             if wait > 0:
                 time.sleep(wait)
-            _state["last_api"] = time.monotonic()
-            if is_first_call:
-                _test_started[0] = now
+            _last_call[0] = time.monotonic()
+            if is_first:
+                _test_start[0] = now
 
     return _acquire

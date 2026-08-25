@@ -45,8 +45,8 @@ from .tools import (
 # --------------- retry helper for Gemini calls -----------------------------
 
 _MAX_RETRIES = 5
-_BASE_BACKOFF = 1.0   # seconds; doubled after each 429, capped at _BACKOFF_CAP
-_BACKOFF_CAP = 30.0
+_BASE_BACKOFF = 2.0   # seconds; doubled after each 429, capped at _BACKOFF_CAP
+_BACKOFF_CAP = 10.0
 
 
 async def _call_with_retry(create_fn, **kwargs):

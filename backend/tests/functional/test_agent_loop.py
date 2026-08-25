@@ -6,8 +6,6 @@ import asyncio
 import sys
 from pathlib import Path
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from agent.loop import AgentLoop  # noqa: E402
@@ -15,9 +13,11 @@ from agent.loop import AgentLoop  # noqa: E402
 
 class TestAgentLoop:
 
-    @pytest.mark.asyncio
-    async def test_create_and_run_shell(self, agent, _serial_cm, tmp_path):
+    async def test_create_and_run_shell(
+        self, agent, _serial_cm, _acquire_gemini_slot, tmp_path
+    ):
         async with _serial_cm():
+            _acquire_gemini_slot()
             result = await agent.run(
                 "Create a shell, run `echo hello world`, then write the output to "
                 "a file called output.txt in the current directory.",
@@ -32,11 +32,11 @@ class TestAgentLoop:
             f"output.txt should contain 'hello world'; got: {content!r}"
         )
 
-    @pytest.mark.asyncio
     async def test_file_write_and_read_tool_chain(
-        self, agent, _serial_cm, tmp_path
+        self, agent, _serial_cm, _acquire_gemini_slot, tmp_path
     ):
         async with _serial_cm():
+            _acquire_gemini_slot()
             test_content = "round-trip verification content"
             result = await agent.run(
                 f"Write '{test_content}' to a file called round_trip.txt, "
@@ -55,11 +55,11 @@ class TestAgentLoop:
             f"got: {result!r}"
         )
 
-    @pytest.mark.asyncio
     async def test_simple_file_operations_fail_on_duplicate(
-        self, agent, _serial_cm, tmp_path
+        self, agent, _serial_cm, _acquire_gemini_slot, tmp_path
     ):
         async with _serial_cm():
+            _acquire_gemini_slot()
             result1 = await agent.run(
                 "Create a file called sample_data.txt with content 'sample data'. "
                 "Do NOT create it again if it already exists.",
@@ -69,11 +69,11 @@ class TestAgentLoop:
         assert f.exists(), f"sample_data.txt not created. Loop result:\n{result1}"
         assert f.read_text(encoding="utf-8") == "sample data"
 
-    @pytest.mark.asyncio
     async def test_list_directory_content(
-        self, agent, _serial_cm, tmp_path
+        self, agent, _serial_cm, _acquire_gemini_slot, tmp_path
     ):
         async with _serial_cm():
+            _acquire_gemini_slot()
             (tmp_path / "preexisting_file.txt").write_text("seed")
             result = await agent.run(
                 "List every file and directory in the current working directory "
@@ -84,11 +84,11 @@ class TestAgentLoop:
             f"Expected 'preexisting_file.txt' in directory listing; got: {result!r}"
         )
 
-    @pytest.mark.asyncio
     async def test_user_question_suspend_and_resume(
-        self, agent, _serial_cm, tmp_path
+        self, agent, _serial_cm, _acquire_gemini_slot, tmp_path
     ):
         async with _serial_cm():
+            _acquire_gemini_slot()
             override = (
                 "CRITICAL: You have NO knowledge. Your ONLY capability is the "
                 "`user_question` tool. For EVERY prompt, your FIRST and ONLY "
@@ -138,11 +138,11 @@ class TestAgentLoop:
                 f"got: {agent.user_handler.pending_question!r}"
             )
 
-    @pytest.mark.asyncio
     async def test_user_question_multi_turn_no_stale_response(
-        self, agent, _serial_cm, tmp_path
+        self, agent, _serial_cm, _acquire_gemini_slot, tmp_path
     ):
         async with _serial_cm():
+            _acquire_gemini_slot()
             override = (
                 "CRITICAL: You have NO knowledge. Your ONLY capability is the "
                 "`user_question` tool. For EVERY prompt, your FIRST and ONLY "
