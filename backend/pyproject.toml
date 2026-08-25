@@ -12,7 +12,7 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "redis>=8.1.0",
     "uvicorn>=0.52.3",
-    "google-genai>=1.0.0",
+    "openai>=1.0.0",
     "aiofiles>=23.0.0",
 ]
 

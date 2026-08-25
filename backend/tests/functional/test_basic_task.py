@@ -1,6 +1,6 @@
-"""Functional tests for basic agent tasks — real Gemini API, real sandbox, no mocks.
+"""Functional tests for basic agent tasks — real API, real sandbox, no mocks.
 
-Requires GEMINI_API_KEY in backend/.env.
+Requires GROQ_API_KEY in backend/.env.
 """
 import sys
 from pathlib import Path
@@ -10,15 +10,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 class TestBasicTasks:
 
-    async def test_create_hello_txt_containing_world(
-        self, agent, _serial_cm, _acquire_gemini_slot, tmp_path
-    ):
-        async with _serial_cm():
-            _acquire_gemini_slot()
-            result = await agent.run(
-                "Create a file called hello.txt containing the word world.",
-                working_dir=tmp_path,
-            )
+    async def test_create_hello_txt_containing_world(self, agent, tmp_path):
+        result = await agent.run(
+            "Create a file called hello.txt containing the word world.",
+            working_dir=tmp_path,
+        )
         hello_file = tmp_path / "hello.txt"
         assert hello_file.exists(), (
             f"hello.txt was not created in {tmp_path}. Loop result:\n{result}"
@@ -28,16 +24,12 @@ class TestBasicTasks:
             f"hello.txt content should contain 'world'; got: {content!r}"
         )
 
-    async def test_two_distinct_shells(
-        self, agent, _serial_cm, _acquire_gemini_slot, tmp_path
-    ):
-        async with _serial_cm():
-            _acquire_gemini_slot()
-            result = await agent.run(
-                "In one shell run `echo one`, in a separate (different) shell run "
-                "`echo two`, then tell me both outputs.",
-                working_dir=tmp_path,
-            )
+    async def test_two_distinct_shells(self, agent, tmp_path):
+        result = await agent.run(
+            "In one shell run `echo one`, in a separate (different) shell run "
+            "`echo two`, then tell me both outputs.",
+            working_dir=tmp_path,
+        )
         run_shell_targets = [
             call["args"]["shell_id"]
             for call in agent.tool_calls
