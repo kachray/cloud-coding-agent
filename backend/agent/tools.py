@@ -3,7 +3,6 @@ from typing import Dict, Any
 
 # Create shell tool declaration
 create_shell_declaration: Dict[str, Any] = {
-    "type": "function",
     "name": "create_shell",
     "description": "Create a new shell environment for executing commands. Returns a unique shell_id that can be used to run commands in that shell.",
     "parameters": {
@@ -20,7 +19,6 @@ create_shell_declaration: Dict[str, Any] = {
 
 # Run in shell tool declaration
 run_in_shell_declaration: Dict[str, Any] = {
-    "type": "function",
     "name": "run_in_shell",
     "description": "Execute a command in an existing shell environment. Returns command output, exit code, and any errors.",
     "parameters": {
@@ -41,7 +39,6 @@ run_in_shell_declaration: Dict[str, Any] = {
 
 # Read file tool declaration
 read_file_declaration: Dict[str, Any] = {
-    "type": "function",
     "name": "read_file",
     "description": "Read the contents of a file from the filesystem. Returns the file contents as a string.",
     "parameters": {
@@ -58,7 +55,6 @@ read_file_declaration: Dict[str, Any] = {
 
 # Write file tool declaration
 write_file_declaration: Dict[str, Any] = {
-    "type": "function",
     "name": "write_file",
     "description": "Write content to a file, overwriting if it exists. Creates the file if it doesn't exist.",
     "parameters": {
@@ -79,7 +75,6 @@ write_file_declaration: Dict[str, Any] = {
 
 # Create file tool declaration
 create_file_declaration: Dict[str, Any] = {
-    "type": "function",
     "name": "create_file",
     "description": "Create a new file at the specified path. Fails if file already exists.",
     "parameters": {
@@ -100,7 +95,6 @@ create_file_declaration: Dict[str, Any] = {
 
 # Delete file tool declaration
 delete_file_declaration: Dict[str, Any] = {
-    "type": "function",
     "name": "delete_file",
     "description": "Delete a file from the filesystem. Fails if the file doesn't exist.",
     "parameters": {
@@ -117,7 +111,6 @@ delete_file_declaration: Dict[str, Any] = {
 
 # Undo tool declaration
 undo_declaration: Dict[str, Any] = {
-    "type": "function",
     "name": "undo",
     "description": "Undo the last file modification operation. Reverts the most recent write/create operation.",
     "parameters": {
@@ -129,7 +122,6 @@ undo_declaration: Dict[str, Any] = {
 
 # User question tool declaration
 user_question_declaration: Dict[str, Any] = {
-    "type": "function",
     "name": "user_question",
     "description": "Ask the user a question and wait for their response. Use this when the agent needs clarification or user input to proceed.",
     "parameters": {

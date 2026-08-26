@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -72,6 +73,7 @@ async def _call_with_retry(create_fn, **kwargs):
                 or "too_many_requests" in msg
                 or "QUOTA_EXCEEDED" in msg
                 or "Please retry in" in msg
+                or ("5" in msg[:3] and "server_error" in msg.lower())
             )
             if not is_rate_limit or attempt == max_retries - 1:
                 raise
@@ -194,7 +196,7 @@ class UserQuestionHandler:
         else:
             try:
                 await asyncio.wait_for(
-                    self._response_event.wait(), timeout=300.0
+                    self._response_event.wait(), timeout=30.0
                 )
             except asyncio.TimeoutError:
                 if self._user_response is not None:

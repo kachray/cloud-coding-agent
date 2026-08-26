@@ -2,18 +2,37 @@
 
 ## Stack
 Backend: Python 3.11+, managed with `uv` (not pip/venv directly — use `uv add`,
-`uv run`). FastAPI. LLM: Groq via the `openai` SDK pointed at Groq's
-OpenAI-compatible endpoint (`base_url="https://api.groq.com/openai/v1"`,
-`api_key=GROQ_API_KEY`) — NOT the `groq` SDK; the OpenAI-compatible path is
-what CLAUDE.md standardizes on since it's the better-documented, more
-battle-tested shape. Model: openai/gpt-oss-120b (real tool-calling
-reliability; openai/gpt-oss-120b). Docker SDK for Python (docker-py). Frontend: Vite +
-React + Tailwind, WebSocket client.
+`uv run`). FastAPI. LLM: Groq via the `groq` SDK (official client; the
+OpenAI-compatible `openai` SDK pointed at Groq's base_url also works
+identically if preferred — either is fine, don't rewrite one into the other
+without reason). Model: `openai/gpt-oss-120b` (Llama 3.3 70B is no longer
+available on Groq as of this project). Free tier for this model: 30 RPM,
+1,000 RPD, 8,000 TPM, **200,000 TPD** — in practice the TPD ceiling binds
+first during heavy iteration, not the request count: a multi-turn agentic
+task resending growing message history can cost a few thousand tokens per
+run, so expect roughly ~100 real task-runs/day, not 1,000, before hitting a
+wall. If this becomes a real blocker, `llama-3.1-8b-instant` has a much
+higher TPD (500,000) as a same-shape fallback — smaller model, less reliable
+tool-calling, but rarely rate-limited. Docker SDK for Python (docker-py).
+Frontend: Vite + React + Tailwind, WebSocket client.
 
 ## Groq / OpenAI-compatible tool-calling — the pattern this project uses
-- Standard `chat.completions.create(model=..., messages=[...], tools=[...])`.
-  `tools` is a list of `{"type": "function", "function": {"name", "description",
-  "parameters"}}` dicts — write these explicitly, same discipline as before.
+- Model must be a plain model (`openai/gpt-oss-120b` / `llama-3.1-8b-instant`),
+  **never `groq/compound` or `groq/compound-mini`.** Those are Groq's built-in
+  agentic systems with their own baked-in web-search/code-execution tools —
+  Groq's own docs state custom user-provided tools are not supported by them
+  at all. They will silently ignore or reject our `create_shell`/`run_in_shell`/
+  etc. tool declarations. This looks like "a more capable model" and is
+  actually an architecturally incompatible one — don't switch to it later
+  assuming it's a drop-in upgrade.
+- `tools.py`'s declarations are the BARE function schema only —
+  `{"name", "description", "parameters"}`, no `"type"` key. Exactly one place
+  in the codebase (the request-building code in `agent/loop.py`) wraps each
+  as `{"type": "function", "function": <bare_schema>}` before sending. If you
+  ever see `"type": "function"` appearing twice, nested, that's this
+  invariant being violated somewhere — Groq is lenient about it today, but
+  it's spec-noncompliant and a stricter backend (OpenAI proper, a future Groq
+  version) will 400 on it.
 - Conversation state is client-managed, not server-managed (no
   `previous_interaction_id` equivalent) — agent/loop.py owns the full
   `messages` list and appends to it every turn: the assistant's message
@@ -27,7 +46,10 @@ React + Tailwind, WebSocket client.
   test call sites. Every call through AgentLoop — tests, and later the real
   multi-sandbox production path — is automatically serialized/throttled this
   way. Do not add per-test rate-limit boilerplate; if a test needs one, the
-  wrapper is broken, fix it there.
+  wrapper is broken, fix it there. Retry on 429 and 5xx (transient); never
+  retry on other 4xx — a bad request won't fix itself by retrying, it needs
+  to be fixed.
+
 
 
 
