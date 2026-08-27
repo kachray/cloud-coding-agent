@@ -306,14 +306,20 @@ class _ShellSession:
             pass
         try:
             await asyncio.wait_for(self._proc.wait(), timeout=2)
-            return
-        except (asyncio.TimeoutError, Exception):
-            pass
-        try:
-            self._proc.kill()
         except Exception:
-            pass
-        try:
-            await asyncio.wait_for(self._proc.wait(), timeout=2)
-        except (asyncio.TimeoutError, Exception):
-            pass
+            try:
+                self._proc.kill()
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(self._proc.wait(), timeout=2)
+            except Exception:
+                pass
+        # Close the stdin write transport explicitly: Windows' proactor loop
+        # emits a "transport was not closed" warning at shutdown when a write
+        # pipe is left dangling after its process exits.
+        if self._proc.stdin is not None and not self._proc.stdin.is_closing():
+            try:
+                self._proc.stdin.close()
+            except Exception:
+                pass

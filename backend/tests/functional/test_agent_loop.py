@@ -6,6 +6,8 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from agent.loop import AgentLoop  # noqa: E402
@@ -47,15 +49,12 @@ class TestAgentLoop:
             f"got: {result!r}"
         )
 
-    async def test_simple_file_operations_fail_on_duplicate(self, agent, tmp_path):
-        result1 = await agent.run(
-            "Create a file called sample_data.txt with content 'sample data'. "
-            "Do NOT create it again if it already exists.",
-            working_dir=tmp_path,
-        )
-        f = tmp_path / "sample_data.txt"
-        assert f.exists(), f"sample_data.txt not created. Loop result:\n{result1}"
-        assert f.read_text(encoding="utf-8") == "sample data"
+    async def test_create_file_fails_on_duplicate(self, sandbox, tmp_path):
+        path = tmp_path / "sample_data.txt"
+        await sandbox.create_file(path, "sample data")
+        assert path.read_text(encoding="utf-8") == "sample data"
+        with pytest.raises(FileExistsError):
+            await sandbox.create_file(path, "other data")
 
     async def test_list_directory_content(self, agent, tmp_path):
         (tmp_path / "preexisting_file.txt").write_text("seed")

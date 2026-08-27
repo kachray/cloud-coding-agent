@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import openai
 from openai import AsyncOpenAI
 
 from sandbox import SandboxInterface
@@ -63,27 +64,17 @@ async def _call_with_retry(create_fn, **kwargs):
     for attempt in range(max_retries):
         try:
             return await create_fn()
-        except Exception as exc:
+        except (openai.RateLimitError, openai.InternalServerError) as exc:
             last_exc = exc
-            msg = str(exc)
-            is_rate_limit = (
-                "429" in msg
-                or "rate_limit" in msg
-                or "rate limit" in msg.lower()
-                or "too_many_requests" in msg
-                or "QUOTA_EXCEEDED" in msg
-                or "Please retry in" in msg
-                or ("5" in msg[:3] and "server_error" in msg.lower())
-            )
-            if not is_rate_limit or attempt == max_retries - 1:
+            if attempt == max_retries - 1:
                 raise
-            m = re.search(r"Please retry in (\d+\.?\d*)s", msg)
+            m = re.search(r"Please retry in (\d+\.?\d*)s", str(exc))
             suggested = float(m.group(1)) if m else 0.0
             wait = min(base_backoff * (2 ** attempt), backoff_cap)
             wait = max(wait, suggested)
             logger.warning(
-                "API rate-limited (attempt %d/%d); sleeping %.1fs then retrying.",
-                attempt + 1, max_retries, wait,
+                "API error %s (attempt %d/%d); sleeping %.1fs then retrying.",
+                type(exc).__name__, attempt + 1, max_retries, wait,
             )
             await asyncio.sleep(wait)
     raise last_exc  # type: ignore[misc]
