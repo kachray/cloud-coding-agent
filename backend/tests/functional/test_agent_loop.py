@@ -70,16 +70,22 @@ class TestAgentLoop:
 
     async def test_user_question_suspend_and_resume(self, agent, tmp_path):
         override = (
-            "CRITICAL: You have NO knowledge. Your ONLY capability is the "
-            "`user_question` tool. For EVERY prompt, your FIRST and ONLY "
+            "CRITICAL: You have NO knowledge of your own and MUST NOT answer "
+            "any question yourself, even trivial ones. Your ONLY capability is "
+            "the `user_question` tool. For EVERY prompt, your FIRST and ONLY "
             "action is to call `user_question` with the exact prompt text. "
             "There is no other path. Calling any other tool or producing "
             "prose without calling user_question first is a total failure. "
-            "Call user_question NOW with the user's exact text."
+            "Call user_question NOW with the user's exact text. "
+            "After you call user_question, you receive a tool result. That "
+            "tool result text IS the user's answer and IS the single correct "
+            "final answer. Your response MUST reproduce that tool result text "
+            "verbatim and nothing else — no commentary, no 'I asked', and no "
+            "answering the question yourself even if you think you know it. "
+            "The user's reply, exactly as it appears in the tool result, is "
+            "the only acceptable output."
         )
-        agent.system_instruction = (
-            override + "\n\n" + (agent.system_instruction or "")
-        )
+        agent.system_instruction = override
 
         loop_task = asyncio.create_task(
             agent.run(
@@ -120,22 +126,28 @@ class TestAgentLoop:
 
     async def test_user_question_multi_turn_no_stale_response(self, agent, tmp_path):
         override = (
-            "CRITICAL: You have NO knowledge. Your ONLY capability is the "
-            "`user_question` tool. For EVERY prompt, your FIRST and ONLY "
+            "CRITICAL: You have NO knowledge of your own and MUST NOT answer "
+            "any question yourself, even trivial ones. Your ONLY capability is "
+            "the `user_question` tool. For EVERY prompt, your FIRST and ONLY "
             "action is to call `user_question` with the exact prompt text. "
             "There is no other path. Calling any other tool or producing "
             "prose without calling user_question first is a total failure. "
-            "Call user_question NOW with the user's exact text."
+            "Call user_question NOW with the user's exact text. "
+            "After you call user_question, you receive a tool result. That "
+            "tool result text IS the user's answer and IS the single correct "
+            "final answer. Your response MUST reproduce that tool result text "
+            "verbatim and nothing else — no commentary, no 'I asked', and no "
+            "answering the question yourself even if you think you know it. "
+            "The user's reply, exactly as it appears in the tool result, is "
+            "the only acceptable output."
         )
-        agent.system_instruction = (
-            override + "\n\n" + (agent.system_instruction or "")
-        )
+        agent.system_instruction = override
 
         # --- First round ---
         loop_task = asyncio.create_task(
             agent.run(
-                "Call user_question with the exact text: 'What is 2 + 2?'. "
-                "Call user_question now.",
+                "Call user_question with the exact text: 'What is the access "
+                "code?'. Call user_question now.",
             )
         )
 
@@ -163,7 +175,7 @@ class TestAgentLoop:
         loop_task2 = asyncio.create_task(
             agent.run(
                 "Now call user_question with the exact text: "
-                "'What is the capital of France?'. "
+                "'What is the secret passphrase?'. "
                 "Call user_question now.",
             )
         )
@@ -180,7 +192,7 @@ class TestAgentLoop:
             f"pending_question is None within {waited:.2f}s. "
             "_user_response was not cleared after the first round."
         )
-        assert "france" in agent.user_handler.pending_question.lower(), (
+        assert "passphrase" in agent.user_handler.pending_question.lower(), (
             f"Unexpected second pending question: "
             f"{agent.user_handler.pending_question!r}"
         )
