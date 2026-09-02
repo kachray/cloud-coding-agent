@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la E:\\\\\\\\cloud-agent\\\\\\\\backend\\\\\\\\.env)",
+      "PowerShell(uv run *)"
+    ]
+  }
+}
