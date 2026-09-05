@@ -6,6 +6,7 @@ tokens, so it is gated behind CCA_SANDBOX=docker (explicit opt-in, same switch
 that routes the existing suite through Docker).
 """
 import os
+from pathlib import Path
 
 import pytest
 
@@ -101,6 +102,23 @@ async def test_undo_restores_previous_content(docker_sandbox):
     with pytest.raises(FileNotFoundError):
         await docker_sandbox.read_file("app.py")
     assert await docker_sandbox.undo() is False  # history exhausted
+
+
+async def test_dotdot_and_absolute_escape_rejected(docker_sandbox, tmp_path):
+    with pytest.raises(PermissionError):
+        await docker_sandbox.write_file(Path("../evil.txt"), "nope")
+    with pytest.raises(PermissionError):
+        await docker_sandbox.write_file(tmp_path.parent / "evil.txt", "nope")
+    assert not (tmp_path.parent / "evil.txt").exists()
+
+
+async def test_run_in_shell_logs_commands(docker_sandbox, tmp_path):
+    shell = await docker_sandbox.create_shell()
+    r = await docker_sandbox.run_in_shell(shell.shell_id, "echo hello")
+    assert r.exit_code == 0, r
+    default = tmp_path.parent / f"{tmp_path.name}.commands.log"
+    assert default.exists()
+    assert "echo hello" in default.read_text(encoding="utf-8")
 
 
 # --- timeouts / lifecycle / resource caps ---------------------------------

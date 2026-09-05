@@ -40,13 +40,13 @@ run_in_shell_declaration: Dict[str, Any] = {
 # Read file tool declaration
 read_file_declaration: Dict[str, Any] = {
     "name": "read_file",
-    "description": "Read the contents of a file from the filesystem. Returns the file contents as a string.",
+    "description": "Read the contents of a file from the filesystem. Returns the file contents as a string. The path must resolve (after `..` and symlinks) to somewhere inside the session's working directory, or the call fails.",
     "parameters": {
         "type": "object",
         "properties": {
             "path": {
                 "type": "string",
-                "description": "The absolute or relative path to the file to read"
+                "description": "The absolute or relative path to the file to read (must be inside the working directory)"
             }
         },
         "required": ["path"]
@@ -56,13 +56,13 @@ read_file_declaration: Dict[str, Any] = {
 # Write file tool declaration
 write_file_declaration: Dict[str, Any] = {
     "name": "write_file",
-    "description": "Write content to a file, overwriting if it exists. Creates the file if it doesn't exist.",
+    "description": "Write content to a file, overwriting if it exists. Creates the file if it doesn't exist. The path must resolve (after `..` and symlinks) to somewhere inside the session's working directory, or the call fails.",
     "parameters": {
         "type": "object",
         "properties": {
             "path": {
                 "type": "string",
-                "description": "The path to the file to write"
+                "description": "The path to the file to write (must be inside the working directory)"
             },
             "content": {
                 "type": "string",
@@ -76,13 +76,13 @@ write_file_declaration: Dict[str, Any] = {
 # Create file tool declaration
 create_file_declaration: Dict[str, Any] = {
     "name": "create_file",
-    "description": "Create a new file at the specified path. Fails if file already exists.",
+    "description": "Create a new file at the specified path. Fails if file already exists. The path must resolve (after `..` and symlinks) to somewhere inside the session's working directory, or the call fails.",
     "parameters": {
         "type": "object",
         "properties": {
             "path": {
                 "type": "string",
-                "description": "The path where the new file should be created"
+                "description": "The path where the new file should be created (must be inside the working directory)"
             },
             "content": {
                 "type": "string",
@@ -96,13 +96,13 @@ create_file_declaration: Dict[str, Any] = {
 # Delete file tool declaration
 delete_file_declaration: Dict[str, Any] = {
     "name": "delete_file",
-    "description": "Delete a file from the filesystem. Fails if the file doesn't exist.",
+    "description": "Delete a file from the filesystem. Fails if the file doesn't exist. The path must resolve (after `..` and symlinks) to somewhere inside the session's working directory, or the call fails.",
     "parameters": {
         "type": "object",
         "properties": {
             "path": {
                 "type": "string",
-                "description": "The path to the file to delete"
+                "description": "The path to the file to delete (must be inside the working directory)"
             }
         },
         "required": ["path"]

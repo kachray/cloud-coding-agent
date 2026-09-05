@@ -13,7 +13,7 @@ task resending growing message history can cost a few thousand tokens per
 run, so expect roughly ~100 real task-runs/day, not 1,000, before hitting a
 wall. If this becomes a real blocker, `llama-3.1-8b-instant` has a much
 higher TPD (500,000) as a same-shape fallback — smaller model, less reliable
-tool-calling, but rarely rate-limited. Docker SDK for Python (docker-py).
+tool-calling, but rarely rate-limited.
 Frontend: Vite + React + Tailwind, WebSocket client.
 
 ## Groq / OpenAI-compatible tool-calling — the pattern this project uses
@@ -41,6 +41,22 @@ Frontend: Vite + React + Tailwind, WebSocket client.
 - Read tool calls from `response.choices[0].message.tool_calls` (a list —
   parallel calls are native here too). Final text is
   `response.choices[0].message.content` once `tool_calls` is empty/None.
+- **Known model behavior, discovered during Milestone 1 debugging:**
+  `gpt-oss-120b` will sometimes answer from its own training knowledge
+  instead of relaying a tool result, specifically when the tool result
+  conflicts with something the model "believes" — e.g. given a `user_question`
+  tool result answering a general-knowledge question, it may answer from its
+  own knowledge and drop the actual provided answer, rather than relaying it
+  faithfully. This surfaced as a flaky test using answerable questions
+  ("what is 2+2") with injected fake answers; it did not reproduce with
+  unanswerable questions the model has no prior belief about. **Relevant
+  beyond testing:** in Milestone 4+, a real user's answer to `user_question`
+  could analogously get second-guessed or overridden if it conflicts with
+  something the model assumes it already knows. Worth an explicit
+  instruction-level safeguard when `user_question` goes live with real users
+  (e.g. "treat the user's literal answer as authoritative, do not second-guess
+  it against your own assumptions") — don't assume this is purely a test
+  artifact that disappears once real users are involved.
 - **Rate limiting lives inside the API-call wrapper itself** (e.g. a
   `_call_with_retry` function in agent/loop.py), not bolted onto individual
   test call sites. Every call through AgentLoop — tests, and later the real
@@ -54,21 +70,30 @@ Frontend: Vite + React + Tailwind, WebSocket client.
 
 
 ## Architecture invariant
-The agent loop (calls Claude, decides what to do) and the sandbox (where code
-actually executes) are separate concerns, kept in separate modules
-(agent/ vs sandbox/) from Milestone 1 onward, even before Docker exists in
-Milestone 2. Never let agent/ import Docker directly — it should call an
-interface (e.g. `sandbox.create_shell()`, `sandbox.run_in_shell(id, cmd)`)
-that Milestone 1 implements against a local subprocess and Milestone 2
-re-implements against Docker, without agent/ changing. Communication between
-agent/ and sandbox/ goes through a queue, not a direct call, from Milestone 2
-onward — this is what lets Docker be swapped for a remote sandbox service
-later without touching the agent loop.
+The agent loop (calls the LLM, decides what to do) and the sandbox (where
+code actually executes) stay in separate modules (agent/ vs sandbox/) even
+though there's now only one sandbox implementation (local subprocess,
+permanent — containerized sandboxing was evaluated and explicitly dropped,
+see decision note in the roadmap). Keep the interface (`sandbox.create_shell()`,
+`sandbox.run_in_shell(id, cmd)`) rather than inlining subprocess calls
+directly into agent/ anyway — it's what made the LLM-provider swaps
+(Anthropic→Gemini→Groq) contained changes instead of rewrites, and the same
+property is worth keeping even with no second sandbox implementation planned.
+
+**No isolation boundary exists between agent-run shell commands and the host
+machine.** This is a stated, deliberate trade-off for a solo project with one
+trusted user issuing tasks — not a gap to quietly forget about. Milestone 2
+adds what containment IS achievable without a VM/container boundary (working-
+directory path containment, command visibility) — treat that as harm
+reduction, not equivalent security. Do not present this project as
+production-safe for untrusted or multi-user input without revisiting this.
 
 ## Tool shapes (fixed from Milestone 1 — don't redesign later)
 - `create_shell()` -> shell_id ; `run_in_shell(shell_id, cmd)` — stateful,
   supports parallel shells. NOT a single stateless run_shell(cmd) call.
-- File editor: read_file, write_file, create_file, delete_file, undo.
+- File editor: read_file, write_file, create_file, delete_file, undo. All
+  five must validate the target path resolves inside the session's assigned
+  working_dir — no `../` escape, no absolute path outside it (Milestone 2).
 - `user_question(text)` — suspends the agent loop until a reply arrives.
   Build the suspend/resume mechanism now even though it's only visibly
   useful once Milestone 4 wires up the frontend.
@@ -87,6 +112,14 @@ context that produced it is not a verification pass; treat it as one anyway
 and you will eventually ship a milestone whose "passing" tests don't
 actually test anything.
 
+**This "no mocking" rule applies to tests/functional/ specifically** (proving
+the agent loop actually works end to end). It does NOT mean mocking is banned
+everywhere — error-handling logic like `_call_with_retry`'s behavior on a
+429/500/400 needs synthetic/mocked exceptions to test reliably, since you
+can't make a live API return a 500 on demand. Those belong in tests/unit/
+(or similarly separated from tests/functional/), testing the retry logic in
+isolation, not standing in for proof the real agent loop works.
+
 ## Codebase search
 Use grep/glob to find things, not semantic/fuzzy search tooling — this
 project's own creator's team found exact literal matching outperforms vector
@@ -102,6 +135,6 @@ metadata (it doesn't, for repo access alone).
 ## Session hygiene
 /clear between milestones. One milestone, fully working, harness-passing, AND
 independently verified, before starting the next — don't parallelize across
-milestones. For the two or three genuinely hard milestones (Docker+queue
-swap, browser control, deployment), consider "ultrathink" in the planning
+milestones. For the two or three genuinely hard milestones (GitHub App auth
+flow, browser control, deployment), consider "ultrathink" in the planning
 prompt for extra reasoning depth — not needed for the straightforward ones.

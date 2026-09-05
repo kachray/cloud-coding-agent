@@ -13,16 +13,20 @@ output reliably (a naive `communicate()` would close the pipe after one
 read and is not usable for a stateful session).
 """
 import asyncio
+import logging
 import os
 import platform
 import shutil
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import aiofiles
+
+logger = logging.getLogger(__name__)
 
 # Opaque marker printed after every command so the wrapper can detect the end
 # of a command's output and capture its exit status reliably. A naive
@@ -51,6 +55,34 @@ class ShellResult:
     stdout: str
     stderr: str
     timeout: bool = False
+
+
+def _resolve_inside(path: Path, root: Path) -> Path:
+    """Resolve *path* relative to *root* (normalizes `..`, resolves symlinks,
+    non-strict so a not-yet-existing create target works) and require the
+    result stays inside *root*; raise PermissionError otherwise."""
+    full = (path if path.is_absolute() else root / path).resolve()
+    try:
+        full.relative_to(root)
+    except ValueError:
+        raise PermissionError(
+            f"Path {str(path)!r} resolves to {full}, outside working_dir {root}"
+        ) from None
+    return full
+
+
+async def _append_command_log(log_path: Path, shell_id: str, cmd: str) -> None:
+    """Append one line per executed command to the session log file.
+
+    Best-effort: a log write failure must never break the command execution.
+    """
+    line = (
+        f"{datetime.now(timezone.utc).isoformat(timespec='seconds')}\t"
+        f"{shell_id}\t{cmd.replace(chr(10), '\\n')}\n"
+    )
+    async with aiofiles.open(log_path, mode="a", encoding="utf-8") as f:
+        await f.write(line)
+        await f.flush()
 
 
 class SandboxInterface(ABC):
@@ -117,12 +149,29 @@ class LocalSandbox(SandboxInterface):
     stateful shell session.
     """
 
-    def __init__(self, working_dir: Optional[Path] = None):
+    def __init__(
+        self,
+        working_dir: Optional[Path] = None,
+        command_log: Optional[Path] = None,
+    ):
         self.working_dir = (working_dir or Path.cwd()).resolve()
+        self._command_log = Path(command_log).resolve() if command_log else None
         self._shells: Dict[str, "_ShellSession"] = {}
         self._file_history: List[Tuple[str, str, Optional[str]]] = []
         self._shell_bin = _resolve_shell_bin()
         self._is_cmd = self._shell_bin.endswith("cmd.exe") or self._shell_bin.endswith("cmd")
+
+    @property
+    def command_log_path(self) -> Path:
+        """Per-session command log file.
+
+        Lazily derived from the current working_dir (``AgentLoop.run`` can
+        reassign ``working_dir`` after construction) and placed *outside* the
+        workspace so the model cannot see or edit its own audit trail.
+        """
+        if self._command_log is not None:
+            return self._command_log
+        return self.working_dir.parent / f"{self.working_dir.name}.commands.log"
 
     # --- shells ---------------------------------------------------------
 
@@ -137,6 +186,10 @@ class LocalSandbox(SandboxInterface):
     async def run_in_shell(self, shell_id: str, cmd: str, timeout: Optional[int] = None) -> ShellResult:
         if shell_id not in self._shells:
             raise ValueError(f"Unknown shell_id: {shell_id}")
+        try:
+            await _append_command_log(self.command_log_path, shell_id, cmd)
+        except Exception as exc:  # logging is visibility, never block execution
+            logger.warning("Failed to append command log for shell %s: %s", shell_id, exc)
         session = self._shells[shell_id]
         try:
             exit_code, stdout, stderr, timed_out = await session.run(cmd, timeout=timeout)
@@ -158,7 +211,7 @@ class LocalSandbox(SandboxInterface):
     # --- file operations -------------------------------------------------
 
     def _full(self, path: Path) -> Path:
-        return path if path.is_absolute() else (self.working_dir / path)
+        return _resolve_inside(path, self.working_dir)
 
     async def read_file(self, path: Path) -> str:
         full = self._full(path)

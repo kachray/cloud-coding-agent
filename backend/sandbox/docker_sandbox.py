@@ -19,6 +19,7 @@ local session (stderr folded into stdout).
 """
 import asyncio
 import io
+import logging
 import tarfile
 import uuid
 from pathlib import Path
@@ -28,12 +29,16 @@ import docker
 from docker.errors import ImageNotFound, NotFound
 
 from .local import (
+    _append_command_log,
     _CMD_MARKER,
     _DEFAULT_CMD_TIMEOUT,
+    _resolve_inside,
     SandboxInterface,
     Shell,
     ShellResult,
 )
+
+logger = logging.getLogger(__name__)
 
 IMAGE_TAG = "cloud-agent-sandbox:dev"
 _CONTAINER_LABEL = {"app": "cloud-agent-sandbox"}
@@ -61,8 +66,10 @@ class DockerSandbox(SandboxInterface):
         nano_cpus: int = 2_000_000_000,
         pids_limit: int = 512,
         client: Optional[Any] = None,
+        command_log: Optional[Path] = None,
     ) -> None:
         self.working_dir = (working_dir or Path.cwd()).resolve()
+        self._command_log = Path(command_log).resolve() if command_log else None
         self.image = image
         self.dockerfile_dir = dockerfile_dir
         self.mem_limit = mem_limit
@@ -74,6 +81,17 @@ class DockerSandbox(SandboxInterface):
         self._shells: Dict[str, "_DockerShellSession"] = {}
         # Same undo-history shape as LocalSandbox: (op, path, old_content).
         self._file_history: List[Tuple[str, str, Optional[str]]] = []
+
+    @property
+    def command_log_path(self) -> Path:
+        """Per-session command log file, on the host, outside the workspace.
+
+        Lazily derived from the current working_dir (``AgentLoop.run`` can
+        reassign ``working_dir`` after construction).
+        """
+        if self._command_log is not None:
+            return self._command_log
+        return self.working_dir.parent / f"{self.working_dir.name}.commands.log"
 
     # --- container lifecycle --------------------------------------------
 
@@ -160,6 +178,10 @@ class DockerSandbox(SandboxInterface):
         if session is None:
             raise ValueError(f"Unknown shell_id: {shell_id}")
         try:
+            await _append_command_log(self.command_log_path, shell_id, cmd)
+        except Exception as exc:  # logging is visibility, never block execution
+            logger.warning("Failed to append command log for shell %s: %s", shell_id, exc)
+        try:
             exit_code, stdout, timed_out = await session.run(cmd, timeout=timeout)
         except Exception as exc:  # exec'd bash died -> surface as an error result
             self._shells.pop(shell_id, None)
@@ -188,21 +210,16 @@ class DockerSandbox(SandboxInterface):
     def _full(self, path: Optional[Path]) -> str:
         """Map a host/relative path to a container path.
 
-        The host working_dir *is* the /workspace bind mount, so the three cases
-        coincide: relative paths and host-absolute paths under working_dir both
-        become /workspace/<rel>; any other absolute path (a real container path
-        like /tmp/...) is passed through unchanged.
+        The host working_dir *is* the /workspace bind mount. Every path is
+        first resolved and checked to stay inside working_dir (see
+        ``_resolve_inside``), so ``..`` escapes, symlink escapes, and absolute
+        paths outside the workspace are rejected before they reach the
+        container — no container path outside /workspace can be produced.
         """
         if path is None:
             return _WORKSPACE
-        p = Path(path)
-        if not p.is_absolute():
-            return f"{_WORKSPACE}/{p.as_posix().lstrip('/')}"
-        try:
-            rel = p.relative_to(self.working_dir)
-        except ValueError:
-            return str(p)
-        return f"{_WORKSPACE}/{rel.as_posix()}"
+        resolved = _resolve_inside(Path(path), self.working_dir)
+        return f"{_WORKSPACE}/{resolved.relative_to(self.working_dir).as_posix()}"
 
     async def read_file(self, path: Path) -> str:
         await self._ensure_container()
