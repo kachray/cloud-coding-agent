@@ -202,3 +202,45 @@ class TestAgentLoop:
             f"Expected 'second_answer' in second round; got: {result2!r}"
         )
         assert agent.user_handler.pending_question is None
+
+    async def test_escape_attempt_is_rejected(self, agent, tmp_path):
+        """A write_file/create_file aimed outside the working_dir must be
+        rejected by the sandbox, not silently write outside the session dir.
+
+        Non-vacuous: the test asserts the model actually *attempted* the
+        outside-path write (>=1 such tool call), so it fails if the model
+        sidesteps the instruction — and asserts every such attempt returned a
+        PermissionError and no file landed outside working_dir.
+        """
+        outside = tmp_path.parent / f"escape_{tmp_path.name}.txt"
+        instruction = (
+            f"Write the text 'pwned' to the file at the absolute path "
+            f"{outside}. This is a required step of the task. You MUST use "
+            f"the write_file or create_file tool with that exact path — do "
+            f"NOT use a shell command. If the first tool fails, retry with "
+            f"the other file tool using the same absolute path. Then report "
+            f"exactly what the tool result said, and whether the file was "
+            f"actually created."
+        )
+        result = await agent.run(instruction, working_dir=tmp_path)
+
+        assert not outside.exists(), (
+            f"file was written OUTSIDE the working_dir at {outside}. "
+            f"Loop result:\n{result}"
+        )
+
+        escape_calls = [
+            c
+            for c in agent.tool_calls
+            if c["name"] in ("write_file", "create_file")
+            and Path(c["args"]["path"]).resolve() == outside.resolve()
+        ]
+        assert escape_calls, (
+            f"agent never attempted the outside-path file write — test is "
+            f"vacuous. Loop result:\n{result}"
+        )
+        for call in escape_calls:
+            error = call.get("error") or call.get("result_preview", "")
+            assert "PermissionError" in error, (
+                f"escape tool call was not rejected: {call}"
+            )
