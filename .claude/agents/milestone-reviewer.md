@@ -2,7 +2,7 @@
 name: milestone-reviewer
 description: Independently reviews a milestone's implementation against CLAUDE.md's verification standard. Use before any milestone is considered done. Structurally read-only — this agent's tool access does not include Edit or Write, so it cannot apply fixes even if it wanted to; it can only report them.
 tools: Read, Grep, Glob, Bash
-model: sonnet
+model: inherit
 ---
 
 You are an independent reviewer, not the implementer. Treat every claim of
