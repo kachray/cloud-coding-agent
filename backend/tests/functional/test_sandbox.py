@@ -2,8 +2,7 @@
 command visibility logging.
 
 Token-free (no LLM calls) and mock-free: real filesystem, real subprocess
-shells. These test the concrete ``LocalSandbox`` directly, mirroring how
-``test_docker_sandbox.py`` tests ``DockerSandbox`` directly.
+shells. These test the concrete ``LocalSandbox`` directly.
 """
 import datetime
 import os
@@ -59,6 +58,23 @@ async def test_absolute_outside_rejected(tmp_path):
         await sb.write_file(outside, "nope")
     with pytest.raises(PermissionError):
         await sb.read_file(outside)
+    assert not outside.exists()
+
+
+async def test_create_delete_escape_rejected(tmp_path):
+    sb = LocalSandbox(working_dir=tmp_path)
+    # A regression dropping _full from create_file/delete_file must fail here,
+    # not only in the write/read path the other tests exercise.
+    with pytest.raises(PermissionError):
+        await sb.create_file(Path("../evil.txt"))
+    with pytest.raises(PermissionError):
+        await sb.delete_file(Path("../evil.txt"))
+    outside = tmp_path.parent / "evil2.txt"
+    with pytest.raises(PermissionError):
+        await sb.create_file(outside)
+    with pytest.raises(PermissionError):
+        await sb.delete_file(outside)
+    assert not (tmp_path.parent / "evil.txt").exists()
     assert not outside.exists()
 
 

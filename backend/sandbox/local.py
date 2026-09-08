@@ -88,9 +88,8 @@ async def _append_command_log(log_path: Path, shell_id: str, cmd: str) -> None:
 class SandboxInterface(ABC):
     """Abstract interface for sandbox operations.
 
-    `agent/` talks only to this interface. The Milestone 2 Docker-backed
-    sandbox will implement the same methods, so the agent loop never imports
-    Docker directly.
+    `agent/` talks only to this interface. The agent loop never imports a
+    concrete sandbox implementation directly.
     """
 
     @abstractmethod

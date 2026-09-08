@@ -40,7 +40,7 @@ run_in_shell_declaration: Dict[str, Any] = {
 # Read file tool declaration
 read_file_declaration: Dict[str, Any] = {
     "name": "read_file",
-    "description": "Read the contents of a file from the filesystem. Returns the file contents as a string. The path must resolve (after `..` and symlinks) to somewhere inside the session's working directory, or the call fails.",
+    "description": "Read the contents of a file from the filesystem. Returns the file contents as a string. The path is normalized (parent `..` collapsed, symlinks resolved) and must resolve inside the session's working directory; the call fails with an error if the resolved path is not inside it.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -56,7 +56,7 @@ read_file_declaration: Dict[str, Any] = {
 # Write file tool declaration
 write_file_declaration: Dict[str, Any] = {
     "name": "write_file",
-    "description": "Write content to a file, overwriting if it exists. Creates the file if it doesn't exist. The path must resolve (after `..` and symlinks) to somewhere inside the session's working directory, or the call fails.",
+    "description": "Write content to a file, overwriting if it exists. Creates the file if it doesn't exist. The path is normalized (parent `..` collapsed, symlinks resolved) and must resolve inside the session's working directory; the call fails with an error if the resolved path is not inside it.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -76,7 +76,7 @@ write_file_declaration: Dict[str, Any] = {
 # Create file tool declaration
 create_file_declaration: Dict[str, Any] = {
     "name": "create_file",
-    "description": "Create a new file at the specified path. Fails if file already exists. The path must resolve (after `..` and symlinks) to somewhere inside the session's working directory, or the call fails.",
+    "description": "Create a new file at the specified path. Fails if file already exists. The path is normalized (parent `..` collapsed, symlinks resolved) and must resolve inside the session's working directory; the call fails with an error if the resolved path is not inside it.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -96,7 +96,7 @@ create_file_declaration: Dict[str, Any] = {
 # Delete file tool declaration
 delete_file_declaration: Dict[str, Any] = {
     "name": "delete_file",
-    "description": "Delete a file from the filesystem. Fails if the file doesn't exist. The path must resolve (after `..` and symlinks) to somewhere inside the session's working directory, or the call fails.",
+    "description": "Delete a file from the filesystem. Fails if the file doesn't exist. The path is normalized (parent `..` collapsed, symlinks resolved) and must resolve inside the session's working directory; the call fails with an error if the resolved path is not inside it.",
     "parameters": {
         "type": "object",
         "properties": {
