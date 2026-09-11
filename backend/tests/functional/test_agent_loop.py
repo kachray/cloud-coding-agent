@@ -14,26 +14,44 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from agent.loop import AgentLoop, _USER_ANSWER_GUARD  # noqa: E402
 
 
-async def _await_pending_question(agent, timeout=20.0):
-    """Poll until the loop suspends at user_question. Returns real elapsed seconds.
+async def _await_pending_question(agent, task, timeout=60.0):
+    """Wait until the loop suspends at user_question, or ``task`` ends.
+
+    Returns ``(elapsed_seconds, failure)``, where ``failure`` describes how
+    ``task`` ended by raising (rate limit, API error, anything) and is None if
+    it did not. Callers assert ``failure is None`` *before* asserting that the
+    loop suspended, so an infrastructure failure is never reported as "the
+    model didn't call the tool" — a misattribution that sent a whole
+    investigation down the wrong path once already.
 
     time.monotonic(), not an accumulated nominal counter: Windows sleep
     granularity makes asyncio.sleep(0.05) cost ~60-75ms, so accumulating the
     nominal 0.05 under-counts elapsed time by ~40% and cut a 5s wait short
     before a 7.45s model turn ever reached the tool call.
 
-    ``timeout`` must stay below UserQuestionHandler.ask's inner 30s
-    wait_for. On a handler timeout, ask() raises *without* clearing
-    _pending_question, so a poll that outlasted 30s would observe the stale
-    question and falsely pass. Firing first is the safe side: the test fails
-    loud, if misattributed to "the model didn't call the tool".
+    ``timeout`` must exceed ``_call_with_retry``'s 429 chain (2+4+8+10 = 24s),
+    or a rate-limited run exhausts this poll while the task is still retrying
+    and gets misreported as model non-response.
+
+    It may safely exceed ``UserQuestionHandler.ask``'s inner 30s ``wait_for``:
+    that timeout only begins once a question is pending, and this poll breaks
+    the moment ``pending_question`` is set, so the stale-pending_question left
+    behind by a handler timeout cannot be observed here.
     """
     start = time.monotonic()
     while time.monotonic() - start < timeout:
         if agent.user_handler.pending_question is not None:
             break
+        if task.done():
+            break
         await asyncio.sleep(0.05)
-    return time.monotonic() - start
+
+    failure = None
+    if task.done() and not task.cancelled():
+        exc = task.exception()
+        if exc is not None:
+            failure = f"{type(exc).__name__}: {exc}"
+    return time.monotonic() - start, failure
 
 
 class TestAgentLoop:
@@ -117,8 +135,13 @@ class TestAgentLoop:
             )
         )
 
-        elapsed = await _await_pending_question(agent)
+        elapsed, failure = await _await_pending_question(agent, loop_task)
 
+        assert failure is None, (
+            f"The loop raised before suspending at user_question (after "
+            f"{elapsed:.2f}s). This is an infrastructure/API failure, NOT "
+            f"model non-response: {failure}"
+        )
         assert agent.user_handler.pending_question is not None, (
             f"Loop did not suspend at user_question within {elapsed:.2f}s. "
             f"pending_question is None — the model didn't call the tool."
@@ -176,8 +199,13 @@ class TestAgentLoop:
             )
         )
 
-        elapsed = await _await_pending_question(agent)
+        elapsed, failure = await _await_pending_question(agent, loop_task)
 
+        assert failure is None, (
+            f"The loop raised before suspending at the first user_question "
+            f"(after {elapsed:.2f}s). This is an infrastructure/API failure, "
+            f"NOT model non-response: {failure}"
+        )
         assert agent.user_handler.pending_question is not None, (
             f"Loop did not suspend at first user_question within {elapsed:.2f}s."
         )
@@ -198,8 +226,13 @@ class TestAgentLoop:
             )
         )
 
-        elapsed2 = await _await_pending_question(agent)
+        elapsed2, failure2 = await _await_pending_question(agent, loop_task2)
 
+        assert failure2 is None, (
+            f"The loop raised before suspending at the second user_question "
+            f"(after {elapsed2:.2f}s). This is an infrastructure/API failure, "
+            f"NOT a stale response: {failure2}"
+        )
         assert agent.user_handler.pending_question is not None, (
             f"Second ask() did NOT suspend — stale response was returned. "
             f"pending_question is None within {elapsed2:.2f}s. "
