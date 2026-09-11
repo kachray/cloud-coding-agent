@@ -67,6 +67,76 @@ Frontend: Vite + React + Tailwind, WebSocket client.
   to be fixed.
 
 
+## Known open model-behavior risks (Milestone 2 investigation)
+Two separate risks, different mechanisms, different blast radius. Neither is
+fully mitigated. Both are documented here so Milestone 3+ doesn't rediscover
+them as "flaky tests" and paper over them.
+
+### Risk 1 — `user_question` tool-result drop ("Mode B")
+After a `user_question` ask resolves, `gpt-oss-120b` sometimes fails to attend
+to the `role: tool` result at all: `finish_reason='stop'`, `tool_calls=[]`,
+re-emitting the prior user turn's text instead of the answer. Same underlying
+behavior as the Milestone 1 note above, but the failure is total rather than a
+substitution — the answer never enters the response.
+
+**Mitigation in place:** `_USER_ANSWER_GUARD` in `agent/loop.py` is appended
+to the answer at the success point in `_dispatch`, so it rides inside the tool
+content. No extra API call, no mid-conversation role. It is applied there and
+not in `run()`'s tool-result append specifically so it can never land on
+`_execute_tool`'s `"ERROR executing user_question: ..."` string.
+
+**What the evidence does and does not support.** 31 post-guard observations of
+`test_user_question_multi_turn_no_stale_response`, 0 failures. That rules out a
+~20% rate (P(0/31 | p=0.2) ≈ 0.1%) but cannot rule out something in the 2–9%
+range (95% upper bound ≈ 9.2% on 0/31). **Every one of those observations was
+under the test's adversarial `system_instruction` override**, which orders the
+model to reproduce the tool result verbatim — conditions specifically designed
+to suppress this exact failure. **The production rate under the default system
+instruction has not been measured.** An attempt to measure it was lost to Groq
+TPD exhaustion and a probe bug, not to a clean result. Treat this as open, not
+fixed.
+
+**If it manifests in Milestone 4:** build the bounded detect-and-retry that was
+scoped but deliberately not built — a single re-prompt when the final content
+following a `user_question` tool result does not reference the answer, attached
+to the real WebSocket-facing `user_question` flow. Do not build it
+speculatively now, and do not treat 31 green observations as proof it's
+unnecessary.
+
+### Risk 2 — transcription corruption on exact-value tokens
+**Separate mechanism, and not scoped to `user_question`.** Observed cleanly: the
+model was given `ZXQ-4471-KESTREL` in a tool result, attended to it, used it,
+and emitted `ZXT-4471-KESTREL` — one character substituted, consistently, in the
+final text. That same run also wrote to a file on disk and the file did **not**
+contain the correct value; the file's text was not captured, so the exact
+character it wrote there is inferred, not verified. Either way the bad value
+went to disk silently: no error, no warning, nothing the loop could detect. The
+surrounding digits (`4471-KESTREL`) survived intact; only the third character
+flipped.
+
+Working hypothesis: an unusual low-probability token gets sampled to a more
+likely near-neighbour. In that batch, readable runs 1–11 scored 5 exact / 6
+not-exact. Of the 6, three had their raw turns captured and all three are the
+single-character substitution above; the other three lost their per-turn detail
+to output truncation, so they are counted as not-exact but **not** confirmed as
+this mechanism. Zero runs showed the Risk 1 drop signature. That batch also had
+a probe bug — the model asks `user_question` twice and only the first ask was
+answered, so an error string entered the history — but the corruption is not
+explained by it: in every affected run the model saw the correct value in turn
+1's tool result. The sample is small and the answer token was deliberately
+exotic, so the *rate* is unknown; the *mechanism* is real.
+
+**Why this matters more than it looks.** Wherever this agent transcribes an
+exact string that a user or a tool supplied, a silent single-character change is
+worse than a crash — it produces plausible, wrong output that nothing
+downstream can flag. Concretely: **Milestone 3's GitHub integration** (commit
+messages, branch names, file contents, anything a SHA, token, or path is echoed
+into), and any future deploy or credential-echoing path. No mitigation is
+built. Watch for it. If it shows up where exactness matters, the fix belongs at
+the transcription boundary — verify a supplied exact value round-trips, or have
+the model copy from a verbatim-constrained channel — not in a retry.
+
+
 
 
 ## Architecture invariant
