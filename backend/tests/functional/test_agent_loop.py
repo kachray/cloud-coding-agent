@@ -52,8 +52,13 @@ async def _await_pending_question(agent, task, timeout=60.0):
 
     It may safely exceed ``UserQuestionHandler.ask``'s inner 30s ``wait_for``:
     that timeout only begins once a question is pending, and this poll breaks
-    the moment ``pending_question`` is set, so the stale-pending_question left
-    behind by a handler timeout cannot be observed here.
+    the moment ``pending_question`` is set, so a handler timeout that fires
+    while this poll runs cannot be observed here. One that fires *later* —
+    after this helper returned, with ``_execute_tool`` swallowing the
+    exception and leaving the flag set — can still make a subsequent call
+    read "suspended" for a loop that is not waiting on anything. The flag
+    belongs to the handler; clearing it in ``ask()``'s timeout branch is the
+    fix if that ever bites.
     """
     start = time.monotonic()
     while time.monotonic() - start < timeout:
@@ -64,15 +69,25 @@ async def _await_pending_question(agent, task, timeout=60.0):
         await asyncio.sleep(0.05)
 
     elapsed = time.monotonic() - start
-    if agent.user_handler.pending_question is not None:
-        return "suspended", elapsed, ""
+    pending = agent.user_handler.pending_question
+
+    # Task state is checked before ``pending_question``, deliberately:
+    # ``ask()``'s timeout path raises *without* clearing ``_pending_question``,
+    # so a loop that has already died can still look suspended. Reporting
+    # "suspended" there is the reverse misattribution — an infrastructure
+    # failure read as the model calling the tool. A question only counts as
+    # pending if the loop is still alive to wait on it.
     if not task.done():
+        if pending is not None:
+            return "suspended", elapsed, ""
         return "timeout", elapsed, ""
     if task.cancelled():
         return "cancelled", elapsed, "task was cancelled"
     exc = task.exception()
     if exc is not None:
         return "raised", elapsed, f"{type(exc).__name__}: {exc}"
+    if pending is not None:
+        return "finished", elapsed, "pending_question was still set"
     return "finished", elapsed, ""
 
 
@@ -90,10 +105,22 @@ def _suspend_gap(status, elapsed, detail, what):
             f"pending. Inconclusive — a slow turn, a hung connection, or an "
             f"extended retry — NOT evidence the model didn't call the tool."
         )
-    return (
-        f"The loop finished without calling {what} (after {elapsed:.2f}s): "
-        f"pending_question is None — the model didn't call the tool."
-    )
+    if status == "finished":
+        if detail:
+            return (
+                f"The loop finished without suspending at {what} (after "
+                f"{elapsed:.2f}s), but {detail}. A stale pending flag is not "
+                f"evidence about the model — look at the run's own error "
+                f"handling instead."
+            )
+        return (
+            f"The loop finished without calling {what} (after {elapsed:.2f}s): "
+            f"pending_question is None — the model didn't call the tool."
+        )
+    # Anything else must not fall through to the model-blaming default: a
+    # silent catch-all here is exactly how this misattribution comes back,
+    # re-introduced by a typo or a sixth status added later.
+    raise ValueError(f"_suspend_gap: unknown status {status!r}")
 
 
 class TestAgentLoop:
