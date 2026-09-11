@@ -17,21 +17,38 @@ from agent.loop import AgentLoop, _USER_ANSWER_GUARD  # noqa: E402
 async def _await_pending_question(agent, task, timeout=60.0):
     """Wait until the loop suspends at user_question, or ``task`` ends.
 
-    Returns ``(elapsed_seconds, failure)``, where ``failure`` describes how
-    ``task`` ended by raising (rate limit, API error, anything) and is None if
-    it did not. Callers assert ``failure is None`` *before* asserting that the
-    loop suspended, so an infrastructure failure is never reported as "the
-    model didn't call the tool" — a misattribution that sent a whole
-    investigation down the wrong path once already.
+    Returns ``(status, elapsed_seconds, detail)``; ``status`` is one of:
+
+      "suspended"  ``pending_question`` is set — the model called the tool
+      "finished"   ``run()`` returned a final answer without ever asking
+      "raised"     ``run()`` ended by raising (rate limit, API error); detail
+      "cancelled"  the task was cancelled; detail
+      "timeout"    still running at the deadline, no question pending
+
+    Only "suspended" means the model called the tool. Everything else is
+    reported as itself: a loop that raised, was cancelled, or is still running
+    is an infrastructure condition and must never be presented as "the model
+    didn't call the tool" — that misattribution sent a whole investigation
+    down the wrong path once already. Callers assert ``status == "suspended"``
+    and format the mismatch with ``_suspend_gap``.
+
+    Caveat: this sees only failures that escape ``run()``. ``_execute_tool``
+    swallows tool exceptions into an "ERROR executing ..." tool result, so a
+    ``user_question`` that raises inside ``_dispatch`` — a missing ``text``
+    arg, say — leaves ``pending_question`` None with the task finishing
+    cleanly, and reads here as "finished".
 
     time.monotonic(), not an accumulated nominal counter: Windows sleep
     granularity makes asyncio.sleep(0.05) cost ~60-75ms, so accumulating the
     nominal 0.05 under-counts elapsed time by ~40% and cut a 5s wait short
     before a 7.45s model turn ever reached the tool call.
 
-    ``timeout`` must exceed ``_call_with_retry``'s 429 chain (2+4+8+10 = 24s),
-    or a rate-limited run exhausts this poll while the task is still retrying
-    and gets misreported as model non-response.
+    ``timeout`` must clear ``_call_with_retry``'s 429 chain (2+4+8+10 = 24s),
+    or a rate-limited run exhausts this poll while the task is still retrying.
+    That is a soft bound only: ``loop.py`` raises its wait to whatever
+    ``"Please retry in Xs"`` the server suggests, with no cap, so a long hint
+    outlives any fixed deadline here — which is why "timeout" is reported as
+    inconclusive rather than as model non-response.
 
     It may safely exceed ``UserQuestionHandler.ask``'s inner 30s ``wait_for``:
     that timeout only begins once a question is pending, and this poll breaks
@@ -46,12 +63,37 @@ async def _await_pending_question(agent, task, timeout=60.0):
             break
         await asyncio.sleep(0.05)
 
-    failure = None
-    if task.done() and not task.cancelled():
-        exc = task.exception()
-        if exc is not None:
-            failure = f"{type(exc).__name__}: {exc}"
-    return time.monotonic() - start, failure
+    elapsed = time.monotonic() - start
+    if agent.user_handler.pending_question is not None:
+        return "suspended", elapsed, ""
+    if not task.done():
+        return "timeout", elapsed, ""
+    if task.cancelled():
+        return "cancelled", elapsed, "task was cancelled"
+    exc = task.exception()
+    if exc is not None:
+        return "raised", elapsed, f"{type(exc).__name__}: {exc}"
+    return "finished", elapsed, ""
+
+
+def _suspend_gap(status, elapsed, detail, what):
+    """Explain, without misattributing, why the loop never suspended at ``what``."""
+    if status in ("raised", "cancelled"):
+        return (
+            f"The loop {status} before suspending at {what} (after "
+            f"{elapsed:.2f}s). That is an infrastructure failure, NOT model "
+            f"non-response: {detail}"
+        )
+    if status == "timeout":
+        return (
+            f"The loop was still running after {elapsed:.2f}s with no {what} "
+            f"pending. Inconclusive — a slow turn, a hung connection, or an "
+            f"extended retry — NOT evidence the model didn't call the tool."
+        )
+    return (
+        f"The loop finished without calling {what} (after {elapsed:.2f}s): "
+        f"pending_question is None — the model didn't call the tool."
+    )
 
 
 class TestAgentLoop:
@@ -135,16 +177,10 @@ class TestAgentLoop:
             )
         )
 
-        elapsed, failure = await _await_pending_question(agent, loop_task)
+        status, elapsed, detail = await _await_pending_question(agent, loop_task)
 
-        assert failure is None, (
-            f"The loop raised before suspending at user_question (after "
-            f"{elapsed:.2f}s). This is an infrastructure/API failure, NOT "
-            f"model non-response: {failure}"
-        )
-        assert agent.user_handler.pending_question is not None, (
-            f"Loop did not suspend at user_question within {elapsed:.2f}s. "
-            f"pending_question is None — the model didn't call the tool."
+        assert status == "suspended", _suspend_gap(
+            status, elapsed, detail, "user_question"
         )
         assert "life" in agent.user_handler.pending_question.lower(), (
             f"Unexpected pending question: "
@@ -199,15 +235,10 @@ class TestAgentLoop:
             )
         )
 
-        elapsed, failure = await _await_pending_question(agent, loop_task)
+        status, elapsed, detail = await _await_pending_question(agent, loop_task)
 
-        assert failure is None, (
-            f"The loop raised before suspending at the first user_question "
-            f"(after {elapsed:.2f}s). This is an infrastructure/API failure, "
-            f"NOT model non-response: {failure}"
-        )
-        assert agent.user_handler.pending_question is not None, (
-            f"Loop did not suspend at first user_question within {elapsed:.2f}s."
+        assert status == "suspended", _suspend_gap(
+            status, elapsed, detail, "the first user_question"
         )
 
         agent.user_handler.set_response("first_answer")
@@ -226,17 +257,18 @@ class TestAgentLoop:
             )
         )
 
-        elapsed2, failure2 = await _await_pending_question(agent, loop_task2)
+        status2, elapsed2, detail2 = await _await_pending_question(agent, loop_task2)
 
-        assert failure2 is None, (
-            f"The loop raised before suspending at the second user_question "
-            f"(after {elapsed2:.2f}s). This is an infrastructure/API failure, "
-            f"NOT a stale response: {failure2}"
-        )
-        assert agent.user_handler.pending_question is not None, (
-            f"Second ask() did NOT suspend — stale response was returned. "
-            f"pending_question is None within {elapsed2:.2f}s. "
-            "_user_response was not cleared after the first round."
+        # A clean finish here is not merely "the model didn't ask" — it is the
+        # exact shape of the stale-response bug, so name that hypothesis when
+        # it applies instead of leaving the reader with a timing complaint.
+        assert status2 == "suspended", _suspend_gap(
+            status2, elapsed2, detail2, "the second user_question"
+        ) + (
+            " A clean finish here means the second ask() did NOT suspend — "
+            "suspect a stale response: _user_response was not cleared after "
+            "the first round."
+            if status2 == "finished" else ""
         )
         assert "passphrase" in agent.user_handler.pending_question.lower(), (
             f"Unexpected second pending question: "
