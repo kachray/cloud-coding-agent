@@ -4,13 +4,36 @@ Requires GROQ_API_KEY in backend/.env.
 """
 import asyncio
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from agent.loop import AgentLoop  # noqa: E402
+from agent.loop import AgentLoop, _USER_ANSWER_GUARD  # noqa: E402
+
+
+async def _await_pending_question(agent, timeout=20.0):
+    """Poll until the loop suspends at user_question. Returns real elapsed seconds.
+
+    time.monotonic(), not an accumulated nominal counter: Windows sleep
+    granularity makes asyncio.sleep(0.05) cost ~60-75ms, so accumulating the
+    nominal 0.05 under-counts elapsed time by ~40% and cut a 5s wait short
+    before a 7.45s model turn ever reached the tool call.
+
+    ``timeout`` must stay below UserQuestionHandler.ask's inner 30s
+    wait_for. On a handler timeout, ask() raises *without* clearing
+    _pending_question, so a poll that outlasted 30s would observe the stale
+    question and falsely pass. Firing first is the safe side: the test fails
+    loud, if misattributed to "the model didn't call the tool".
+    """
+    start = time.monotonic()
+    while time.monotonic() - start < timeout:
+        if agent.user_handler.pending_question is not None:
+            break
+        await asyncio.sleep(0.05)
+    return time.monotonic() - start
 
 
 class TestAgentLoop:
@@ -94,17 +117,10 @@ class TestAgentLoop:
             )
         )
 
-        deadline = 5.0
-        waited = 0.0
-        poll = 0.05
-        while waited < deadline:
-            if agent.user_handler.pending_question is not None:
-                break
-            await asyncio.sleep(poll)
-            waited += poll
+        elapsed = await _await_pending_question(agent)
 
         assert agent.user_handler.pending_question is not None, (
-            f"Loop did not suspend at user_question within {waited:.2f}s. "
+            f"Loop did not suspend at user_question within {elapsed:.2f}s. "
             f"pending_question is None — the model didn't call the tool."
         )
         assert "life" in agent.user_handler.pending_question.lower(), (
@@ -121,6 +137,16 @@ class TestAgentLoop:
         assert agent.user_handler.pending_question is None, (
             "pending_question should be cleared after the loop resumes; "
             f"got: {agent.user_handler.pending_question!r}"
+        )
+        # The answer the model saw must carry the guard, not the bare string —
+        # otherwise the loop's anti-drop mechanism is not reaching the API.
+        tool_msgs = [m for m in agent._messages if m["role"] == "tool"]
+        assert any(
+            "42" in m["content"] and _USER_ANSWER_GUARD in m["content"]
+            for m in tool_msgs
+        ), (
+            f"user_question tool result did not carry _USER_ANSWER_GUARD; "
+            f"tool messages were: {tool_msgs!r}"
         )
 
     async def test_user_question_multi_turn_no_stale_response(self, agent, tmp_path):
@@ -150,17 +176,10 @@ class TestAgentLoop:
             )
         )
 
-        deadline = 5.0
-        waited = 0.0
-        poll = 0.05
-        while waited < deadline:
-            if agent.user_handler.pending_question is not None:
-                break
-            await asyncio.sleep(poll)
-            waited += poll
+        elapsed = await _await_pending_question(agent)
 
         assert agent.user_handler.pending_question is not None, (
-            f"Loop did not suspend at first user_question within {waited:.2f}s."
+            f"Loop did not suspend at first user_question within {elapsed:.2f}s."
         )
 
         agent.user_handler.set_response("first_answer")
@@ -179,16 +198,11 @@ class TestAgentLoop:
             )
         )
 
-        waited = 0.0
-        while waited < deadline:
-            if agent.user_handler.pending_question is not None:
-                break
-            await asyncio.sleep(poll)
-            waited += poll
+        elapsed2 = await _await_pending_question(agent)
 
         assert agent.user_handler.pending_question is not None, (
             f"Second ask() did NOT suspend — stale response was returned. "
-            f"pending_question is None within {waited:.2f}s. "
+            f"pending_question is None within {elapsed2:.2f}s. "
             "_user_response was not cleared after the first round."
         )
         assert "passphrase" in agent.user_handler.pending_question.lower(), (

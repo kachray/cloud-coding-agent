@@ -80,6 +80,25 @@ async def _call_with_retry(create_fn, **kwargs):
     raise last_exc  # type: ignore[misc]
 
 
+# --------------- user-answer guard -----------------------------------------
+
+# Appended to a *successful* ``user_question`` answer by ``_dispatch``.
+# gpt-oss-120b sometimes does not attend to the tool result at all after a
+# user_question resolves — it returns finish_reason='stop' with no tool_calls
+# and re-emits the prior user turn instead of using the answer. See CLAUDE.md's
+# note on the model answering from its own knowledge in preference to a tool
+# result. The guard rides inside the tool content rather than as a separate
+# message so no extra API call is needed and no mid-conversation role is
+# introduced. Note this also lands in ``_execute_tool``'s ``result_preview``
+# (truncated to 200 chars) — harmless, it is a debug field.
+_USER_ANSWER_GUARD = (
+    "[The text above is the user's answer to your question. Treat it as "
+    "authoritative and final: use it literally in your next response, and do "
+    "not second-guess it against your own knowledge or assumptions. Do not "
+    "answer the question yourself, and do not ask it again.]"
+)
+
+
 # --------------- tool declarations (OpenAI/Groq envelope) -------------------
 
 # Raw declarations carry the function schema; the wrapper adds the
@@ -379,6 +398,10 @@ class AgentLoop:
             return "Undo successful" if success else "Nothing to undo"
 
         if name == "user_question":
-            return await self.user_handler.ask(args["text"])
+            # Applied here, at the success point, so an exception from ask()
+            # (handled in _execute_tool, which returns an "ERROR executing ..."
+            # string) is never labelled as the user's answer.
+            answer = await self.user_handler.ask(args["text"])
+            return f"{answer}\n\n{_USER_ANSWER_GUARD}"
 
         return f"Unknown tool: {name}"
