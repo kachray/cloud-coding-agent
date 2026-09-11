@@ -85,13 +85,18 @@ content. No extra API call, no mid-conversation role. It is applied there and
 not in `run()`'s tool-result append specifically so it can never land on
 `_execute_tool`'s `"ERROR executing user_question: ..."` string.
 
-**What the evidence does and does not support.** 31 post-guard observations of
-`test_user_question_multi_turn_no_stale_response`, 0 failures. That rules out a
-~20% rate (P(0/31 | p=0.2) ≈ 0.1%) but cannot rule out something in the 2–9%
-range (95% upper bound ≈ 9.2% on 0/31). "Post-guard" rests on the session
-record, not on git history: the 12 earliest of the 31 ran from the working
-tree before the guard was committed, and git cannot show what those runs
-executed. **Every one of those observations was
+**What the evidence does and does not support. At least 32** post-guard
+observations of `test_user_question_multi_turn_no_stale_response`, 0 failures —
+13 isolated runs and 4 full-suite runs before the final 15-run isolated batch.
+That count is a **floor, not a tally**: the record preserves those runs but not
+the repeated-run shell loops in between, so the true number is higher and
+unknown. At n=32 it rules out a ~20% rate (P(0/32 | p=0.2) ≈ 0.08%) but cannot
+rule out something in the 2–9% range (95% upper bound ≈ 8.9%). "Post-guard"
+rests on the session record, not on git history — and the reason is stronger
+than commit timing: the guard was wired in before the first run, but its
+*placement* changed mid-batch, from `run()`'s tool-result loop to `_dispatch`'s
+success point, which is what the committed code has. Git cannot vouch for what
+any pre-batch run executed. **Every one of those observations was
 under the test's adversarial `system_instruction` override**, which orders the
 model to reproduce the tool result verbatim — conditions specifically designed
 to suppress this exact failure. **The production rate under the default system
@@ -103,7 +108,7 @@ fixed.
 scoped but deliberately not built — a single re-prompt when the final content
 following a `user_question` tool result does not reference the answer, attached
 to the real WebSocket-facing `user_question` flow. Do not build it
-speculatively now, and do not treat 31 green observations as proof it's
+speculatively now, and do not treat 32 green observations as proof it's
 unnecessary.
 
 ### Risk 2 — transcription corruption on exact-value tokens
@@ -112,19 +117,26 @@ model was given `ZXQ-4471-KESTREL` in a tool result, attended to it, used it,
 and emitted `ZXT-4471-KESTREL` — one character substituted, the same
 substitution in all three runs whose turns were captured. That same run also
 wrote to a file on disk and the file did **not** contain the correct value; the
-file's text was not captured, so the exact character it wrote there is inferred,
-not verified. Either way the bad value went to disk silently: no error, no
-warning, nothing the loop could detect. The surrounding digits
-(`4471-KESTREL`) survived intact; only the third character flipped.
+probe's file check is "the exact answer is in the file", which is also false
+when no file was written, so that is an inference from the `write_file` call
+having happened, not an observation. The file's text was not captured either
+way, so the exact character it wrote is inferred too. Nothing in the run
+flagged a write error, and nothing in the loop could have: the bad value
+would reach disk silently. The surrounding digits (`4471-KESTREL`) survived
+intact; only the third character flipped.
 
 Working hypothesis: an unusual low-probability token gets sampled to a more
 likely near-neighbour. In that batch the probe's own counters scored runs 1–11
-as 5 exact / 6 not-exact; runs 12–15 fell to rate limiting and are excluded.
-Of the 6 not-exact runs, three (7, 9, 10) still had their raw turns and all
-three are the single-character substitution above. The other three (2, 5, 6)
-were scored not-exact by the same counters, but their per-turn detail was lost
-to output truncation, so they are **not** confirmed as this mechanism. Runs 1–6
-lost their turns entirely, so the Risk 1 drop signature could not be checked in
+as 5 exact / 6 not-exact (its SUMMARY read 5 pass / 7 fail / 3 no-ask over 15
+runs, FAILING RUNS `[2, 5, 6, 7, 9, 10, 12]`). Run 12 is excluded here as
+rate-limit-contaminated — its raw final is a 429 TPD `RateLimitError`, and its
+28.86s runtime shows the retries — as are runs 13–15, which the probe scored
+NO_ASK. Those exclusions are mine, not the script's. Of the 6 not-exact runs,
+three (7, 9, 10) still had their raw turns and all three are the
+single-character substitution above. The other three (2, 5, 6) were scored
+not-exact by the same counters, but their per-turn detail was lost to output
+truncation, so they are **not** confirmed as this mechanism. Runs 1–6 lost
+their turns entirely, so the Risk 1 drop signature could not be checked in
 them at all; no run whose turns survived showed it. That batch also had a probe
 bug — the model asks `user_question` twice and only the first ask was answered,
 so an error string entered the history — and the corruption is not *directly*
