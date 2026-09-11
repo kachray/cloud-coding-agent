@@ -54,6 +54,20 @@ async def test_reports_failure_when_loop_task_raises():
         f"must break as soon as the task ends; waited {elapsed:.2f}s"
     )
 
+    text = _suspend_gap(status, elapsed, detail, "user_question")
+    assert "infrastructure" in text.lower(), (
+        f"a rate-limited loop must be named as infrastructure: {text!r}"
+    )
+    assert "429" in text, (
+        f"the gap report must carry the underlying error, not just a label: "
+        f"{text!r}"
+    )
+    assert "NOT" in text, (
+        f"the infrastructure report must explicitly disclaim model "
+        f"non-response rather than leaving it as the standing explanation: "
+        f"{text!r}"
+    )
+
 
 async def test_clean_finish_without_asking_is_model_behavior():
     async def quiet():
@@ -70,6 +84,16 @@ async def test_clean_finish_without_asking_is_model_behavior():
     )
     assert detail == ""
     assert elapsed < 5.0
+
+    text = _suspend_gap(status, elapsed, detail, "user_question")
+    assert "infrastructure" not in text.lower(), (
+        f"a clean finish is model behavior, NOT an infrastructure failure — "
+        f"the inverse misattribution, and just as wrong: {text!r}"
+    )
+    assert "didn't call the tool" in text, (
+        f"a clean finish is the one case that IS model non-response and "
+        f"should say so plainly: {text!r}"
+    )
 
 
 async def test_still_running_at_deadline_is_inconclusive_not_silence():
