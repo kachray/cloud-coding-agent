@@ -120,6 +120,22 @@ undo_declaration: Dict[str, Any] = {
     }
 }
 
+# GitHub clone tool declaration
+github_clone_declaration: Dict[str, Any] = {
+    "name": "github_clone",
+    "description": "Clone a GitHub repository into a fresh working directory and make that clone the working directory for all subsequent file and shell tools. Requires the repository to already be accessible through this session's GitHub App installation.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "repo": {
+                "type": "string",
+                "description": "The repository to clone, as 'owner/name' (e.g. 'octocat/Hello-World'). Do not pass a URL."
+            }
+        },
+        "required": ["repo"]
+    }
+}
+
 # User question tool declaration
 user_question_declaration: Dict[str, Any] = {
     "name": "user_question",

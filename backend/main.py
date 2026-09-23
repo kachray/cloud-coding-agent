@@ -9,7 +9,10 @@ from fastapi import FastAPI
 env_path = Path(__file__).parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
+from github.router import router as github_router  # noqa: E402
+
 app = FastAPI(title="Cloud Coding Agent API")
+app.include_router(github_router)
 
 
 @app.get("/health")

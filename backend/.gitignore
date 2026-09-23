@@ -9,3 +9,9 @@ wheels/
 # Virtual environments
 .venv
 .env
+
+# GitHub App private key (never commit key material)
+secrets/
+
+# Per-session clone workspaces
+workspaces/

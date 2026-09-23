@@ -13,12 +13,12 @@ dependencies = [
     "uvicorn>=0.52.3",
     "openai>=1.0.0",
     "aiofiles>=23.0.0",
+    "pyjwt[crypto]>=2.14.0",
+    "httpx2>=2.10.0",
 ]
 
 [dependency-groups]
-dev = [
-    "httpx2>=2.10.0",
-]
+dev = []
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

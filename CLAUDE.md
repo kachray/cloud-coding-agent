@@ -159,6 +159,68 @@ the model copy from a verbatim-constrained channel — not in a retry.
 
 
 
+## GitHub App integration (Milestone 3)
+Module: `backend/github/` — `auth.py` (App credentials, JWT minting, installation
+token cache), `repo.py` (repo-name validation, workspace allocation, clone),
+`router.py` (`/github/install`, `/github/callback`, `/github/installations`).
+
+Credential chain, in order, nothing persisted at the end of it: App private key
+(file) → RS256 JWT, ≤9 min, backdated 60s → installation token, 1 hour, held in
+memory only. No PAT, no refresh token, and the user-authorization (OAuth) leg of
+the App flow is deliberately not built — it exists to read user metadata, which
+repo access alone does not need. Repository permissions are read-only until a
+push feature actually exists; asking for write we don't use would force every
+installation through a re-approval later.
+
+**Three places the installation token must never appear**, because each one is
+an invariant someone will otherwise break by taking the obvious shortcut:
+
+1. **Not in `argv`.** The clone runs as its own subprocess in `github/repo.py`,
+   *not* through `run_in_shell` — the sandbox appends every command to
+   `<workspace>.commands.log` on disk, so a token in a clone command is a token
+   in the agent's audit log. It is passed via git's `GIT_CONFIG_KEY_0` /
+   `GIT_CONFIG_VALUE_0` environment mechanism (`http.extraheader`) instead.
+2. **Not in the clone's `.git/config`.** Embedding it in the clone URL —
+   `https://x-access-token:ghs_…@github.com/…` — is the obvious approach and it
+   writes the token to disk for the life of the workspace.
+3. **Not in `messages`.** A token in a tool result is a token in the model's
+   context, which means one it can leak or mistranscribe (Risk 2 above).
+   `github_clone` returns the path and the repo name only.
+
+The git child gets an **allow-listed** environment, not `os.environ` minus a few
+names — it fails closed, so a secret added to `.env` later is not silently
+inherited. The same reasoning is why `GITHUB_APP_PRIVATE_KEY_PATH` is a *file
+path* and not an inline PEM: `LocalSandbox` spawns shells with no `env=`, so
+anything in the backend's environment is readable from inside the agent's own
+shell.
+
+**Token refresh is lazy, at the point of use** — `InstallationTokens.get()` is
+called immediately before every operation, and mints a new token when the cached
+one has under 300s left. There is no timer and no background task, deliberately:
+a background refresher is a second source of truth that can stop silently, and
+the first symptom would be a push failing an hour later for no visible reason.
+Do not "improve" this into a scheduled refresh.
+
+The App does not sign its install callback, so anyone can hit
+`/github/callback?installation_id=<guessed>`. Two checks stand in for the
+signature GitHub doesn't provide: a single-use, 10-minute `state` we issue
+ourselves (fails closed on reuse and expiry), and `GET /app/installations/{id}`
+with an app JWT, which 404s for an installation belonging to a different App.
+
+Configuration (`backend/.env`, never committed): `GITHUB_APP_ID`,
+`GITHUB_APP_PRIVATE_KEY_PATH` (relative to `backend/`, key file is gitignored
+under `backend/secrets/`), `GITHUB_APP_SLUG`, and `GITHUB_INSTALLATION_ID` as
+the fallback the agent loop reads when no `GitHubClient` was injected. The
+functional test additionally reads `GITHUB_TEST_INSTALLATION_ID` and
+`GITHUB_TEST_REPO` (must be a **private** repo — on a public one a successful
+clone proves nothing, which is why the suite also asserts that a tokenless clone
+of the same repo fails).
+
+Not built: push, commit, branch, pull request (that is where Risk 2's blast
+radius lives — commit messages, branch names, SHAs — and it needs its own pass
+with the transcription boundary considered first), webhooks, and the frontend.
+Install workspaces under `backend/workspaces/` are never pruned.
+
 ## Architecture invariant
 The agent loop (calls the LLM, decides what to do) and the sandbox (where
 code actually executes) stay in separate modules (agent/ vs sandbox/) even

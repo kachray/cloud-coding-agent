@@ -22,12 +22,14 @@ from typing import Any, Dict, List, Optional
 import openai
 from openai import AsyncOpenAI
 
+from github import GitHubClient
 from sandbox import SandboxInterface
 
 from .tools import (
     create_file_declaration,
     create_shell_declaration,
     delete_file_declaration,
+    github_clone_declaration,
     read_file_declaration,
     run_in_shell_declaration,
     undo_declaration,
@@ -112,6 +114,7 @@ _RAW_TOOL_DECLARATIONS: List[Dict[str, Any]] = [
     create_file_declaration,
     delete_file_declaration,
     undo_declaration,
+    github_clone_declaration,
     user_question_declaration,
 ]
 
@@ -264,6 +267,7 @@ class AgentLoop:
             "is complete, summarize what you did."
         ),
         max_iterations: int = 25,
+        github: Optional[GitHubClient] = None,
     ) -> None:
         if not isinstance(sandbox, SandboxInterface):
             raise TypeError(
@@ -273,6 +277,7 @@ class AgentLoop:
         self.sandbox: SandboxInterface = sandbox
         self.model = model
         self._client = client
+        self._github = github
         self.system_instruction = system_instruction
         self.max_iterations = max_iterations
         self._messages: List[Dict[str, Any]] = []
@@ -287,6 +292,25 @@ class AgentLoop:
                 api_key=os.environ.get("GROQ_API_KEY"),
             )
         return self._client
+
+    @property
+    def github(self) -> GitHubClient:
+        """The GitHub surface for this session.
+
+        Built lazily so an installation id that arrives after construction
+        (the callback lands, then the session starts) is still picked up, and
+        so constructing an AgentLoop never requires GitHub configuration.
+        """
+        if self._github is None:
+            installation_id = os.environ.get("GITHUB_INSTALLATION_ID")
+            if not installation_id:
+                raise RuntimeError(
+                    "No GitHub installation for this session: pass "
+                    "AgentLoop(github=GitHubClient(installation_id=...)) or set "
+                    "GITHUB_INSTALLATION_ID."
+                )
+            self._github = GitHubClient(int(installation_id))
+        return self._github
 
     async def run(self, instruction: str, working_dir: Optional[Path] = None) -> str:
         """Run the agent loop to completion and return the final output text."""
@@ -396,6 +420,14 @@ class AgentLoop:
         if name == "undo":
             success = await self.sandbox.undo()
             return "Undo successful" if success else "Nothing to undo"
+
+        if name == "github_clone":
+            path = await self.github.clone(args["repo"])
+            # The clone becomes this session's world: every file and shell tool
+            # resolves against sandbox.working_dir, so nothing else needs to
+            # change for the agent to work inside the repository.
+            self.sandbox.working_dir = path.resolve()
+            return f"Cloned {args['repo']} into {path}"
 
         if name == "user_question":
             # Applied here, at the success point, so an exception from ask()
